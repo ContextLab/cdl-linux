@@ -1,0 +1,8 @@
+# OMC session state — machine-local, not project content
+.omc/
+
+# Raw research dumps (large; digests are committed instead)
+notes/research/*-raw.json
+
+# Scratch
+*.bak-*
