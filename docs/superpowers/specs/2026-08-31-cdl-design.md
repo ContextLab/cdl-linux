@@ -111,14 +111,14 @@ Requirements that **cannot be satisfied as originally stated**. Each is stated w
 | Cmd keybindings + system clipboard on the bare console | `keymaps(5)` documents nine console modifiers, none of which is Super. `console_codes(4)` supports two OSC sequences; OSC 52 is not among them. | Real terminal emulator. See §6. |
 | Ship LM Studio or Claude Code on the ISO | LM Studio's terms forbid sublicensing, distributing or transferring the software. Claude Code's license grants no sublicense. | Fetch-on-demand helpers running each vendor's own installer, so the user accepts the license directly and we redistribute nothing. |
 | Bake the CUDA **toolkit** into the ISO | The CUDA EULA permits redistribution only for applications with "material additional functionality"; an OS does not qualify. Ubuntu places it in multiverse. | Ship the NVIDIA **driver** (explicitly redistributable for OSI-licensed kernels); pull CUDA at first boot. PyTorch wheels bundle their own CUDA runtime anyway. |
-| Redistribute Rhino branding | `rhino-linux/branding`, `/wallpapers`, `/plymouth`, `/lightdm` have **no LICENSE file**; default copyright applies. | Use ContextLab's own MIT-licensed assets. See §9. |
-| ~2 TB with any redundancy | Arithmetic: two 1 TB drives give 2 TB with none, or 1 TB mirrored. | Accepted deliberately (D15). Off-machine backup is therefore mandatory, not optional. See §8. |
+| Redistribute Rhino branding | `rhino-linux/branding`, `/wallpapers`, `/plymouth`, `/lightdm` have **no LICENSE file**; default copyright applies. | Use ContextLab's own MIT-licensed assets. See §12. |
+| ~2 TB with any redundancy | Arithmetic: two 1 TB drives give 2 TB with none, or 1 TB mirrored. | Accepted deliberately (D15). Off-machine backup is therefore mandatory, not optional. See §10. |
 | Fully unattended install | Wifi credentials, LUKS passphrase, API keys and remote-host key enrollment are all irreducibly interactive. | The install is interactive by design. This spec does not claim otherwise. |
 | OAuth/SAML login from a text browser | Terminal browsers have no JavaScript engine; modern IdP consent screens are JS SPAs. | Never authenticate on the machine. Pre-generate tokens elsewhere; complete browser flows on another device. |
 
 ---
 
-## 4. §1 — Storage and boot
+## 4. Storage and boot
 
 ```
 nvme0n1p1   ESP      FAT32   1 GiB        unencrypted (UEFI reads only plain FAT32)
@@ -146,14 +146,14 @@ Swap **must** be inside LUKS; swap outside it writes RAM contents, including API
    "GPU has fallen off the bus" under runtime PM.
 2. NVIDIA writes ~16 GB of VRAM to `NVreg_TemporaryFilePath` on each hibernate. That path must be on
    the big volume, never tmpfs, and it is real write amplification.
-3. Resume traverses four layers. **Must be proven in QEMU before touching hardware** (§10).
+3. Resume traverses four layers. **Must be proven in QEMU before touching hardware** (§13).
 
 **Contingent on hardware capture:** swap size follows measured RAM; the whole striping design assumes
-both drives are NVMe. See §11.
+both drives are NVMe. See §14.
 
 ---
 
-## 5. §2 — Session and display
+## 5. Session and display
 
 Boot → autologin on tty1 → `cage` (single-client kiosk compositor, ~77 kB, no config file, cannot
 display two windows) → one fullscreen **kitty**. **zellij** inside it for multiplexing. A rescue
@@ -178,7 +178,7 @@ yields a shell with live credentials; FDE protects only a powered-off machine. S
 
 ---
 
-## 6. §3 — Keybindings
+## 6. Keybindings
 
 A single machine-readable Cmd table is the source of truth; every downstream config is generated from
 it: `keyd`, kitty, `~/.inputrc`, zsh bindkeys, helix, neovim, zellij, yazi, and Emacs via the `kkp`
@@ -199,7 +199,7 @@ the rescue console behaves differently from the session.
 
 ---
 
-## 7. §4 — LLM layer
+## 7. LLM layer
 
 **Engines.** `llama.cpp` (its `llama-server` uniquely serves OpenAI chat-completions, OpenAI Responses
 *and* Anthropic Messages from one binary), Ollama via Pacstall, and `llama-swap` to hot-swap models
@@ -221,7 +221,7 @@ models that cannot load. Disk-quota and GC policy required: nothing may silently
 
 ---
 
-## 8. §5 — Agent orchestration
+## 8. Agent orchestration
 
 **Worktree per agent, enforced.** A shared checkout is not merely untidy: measured, agents sharing one
 checkout landed 24 of 100 commits with 75 `index.lock` failures, staging each other's half-finished
@@ -247,7 +247,7 @@ in. Interactive panes start under `systemd-run --scope --user` so they outlive t
 `ManagedOOMMemoryPressure=kill` at a 50 % limit with a 20 s pressure duration, so an arbitrary
 descendant cgroup is killed under pressure and the victim is not chosen — potentially the multiplexer,
 taking every agent with it. Ship per-agent slices plus `ManagedOOMPreference=avoid` on the supervisor
-and notifier. *(Verify these values on the target before relying on them — §12.)*
+and notifier. *(Verify these values on the target before relying on them — §16.)*
 
 **GPU arbitration.** One inference server as a system service behind a `flock` semaphore. MIG does not
 exist on laptop GPUs, and MPS attributes all activity to the MPS server in `nvidia-smi`, destroying
@@ -257,7 +257,7 @@ per-agent attribution exactly when supervising several agents. Admission control
 
 ---
 
-## 9. §6 — Remote compute
+## 9. Remote compute
 
 **Interface:** two functions — `submit → job id`, `poll → status` — over a **durable on-disk job
 registry**, so a job survives the process that launched it and can be re-attached from any later
@@ -283,7 +283,7 @@ own merits and must not gate this project.
 
 ---
 
-## 10. §7 — Backup and recovery
+## 10. Backup and recovery
 
 **Backup is load-bearing, not a convenience.** D15 accepted total loss on single-drive failure, and
 snapshots live on the same volume they protect. An off-machine backup is the only thing between one
@@ -300,9 +300,9 @@ A known-good Ubuntu live USB is retained permanently.
 
 ---
 
-## 11. §8 — Documentation
+## 11. Documentation
 
-MkDocs, themed from the tokens in §9 for continuity with the lab's existing sites.
+MkDocs, themed from the tokens in §12 for continuity with the lab's existing sites.
 
 **Screenshots are regression tests.** `vhs` tapes rendered to **PNG** and diffed in CI: PNG output is
 byte-identical across runs, GIF output is not. The CI runner must have `fonts-firacode` installed or
@@ -318,7 +318,7 @@ boot.
 
 ---
 
-## 12. §9 — Branding and theme
+## 12. Branding and theme
 
 All assets are ContextLab's own, from the **MIT-licensed** `ContextLab/contextlab.github.io` and
 `llm-course` repositories. This sidesteps entirely the finding that Rhino's branding repositories
@@ -355,7 +355,7 @@ splash, borders, inactive chrome. Their darkness is the point.
 
 ---
 
-## 13. §10 — Validation ladder
+## 13. Validation ladder
 
 | Stage | Validates | Needs target hardware |
 |-|-|-|
@@ -372,7 +372,7 @@ self-hosted runner.
 
 ---
 
-## 14. §11 — Pre-wipe hardware capture
+## 14. Pre-wipe hardware capture
 
 One-way. Every fact becomes unobtainable after installation, and at least six decisions currently rest
 on assumptions. Required **before stage 3**, not before stage 1.
