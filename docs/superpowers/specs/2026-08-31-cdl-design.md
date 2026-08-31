@@ -50,7 +50,7 @@ Every design decision below serves that formulation, not the stronger one.
 
 ### 1.5 What the target machine actually is
 
-Measured during design: the lab's `<gpu-host>` has **4× RTX A6000 (~192 GB VRAM), 64 cores, 503 GB
+Measured during design: the lab's remote GPU host has **4× RTX A6000 (~192 GB VRAM), 64 cores, 503 GB
 RAM**. The Tensorbook has a single laptop GPU. Serious training and large-model inference belong on
 the remote host.
 
