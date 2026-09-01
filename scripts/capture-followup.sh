@@ -40,8 +40,66 @@ MEDIA_ERR_WARN=0        # "Media and Data Integrity Errors". Under RAID0, non-ze
                         # signal, not noise — there is no second copy.
 POWER_ON_HOURS_NOTE=8760  # Purely informational: flag drives past ~1 year of power-on time.
 
+
+say() { printf '\n\033[1m== %s ==\033[0m\n' "$1"; }
+
+# One line per display connector: name, connected/disconnected, and which driver owns it.
+# The driver is the point — it decides whether a given output depends on the NVIDIA stack.
+snapshot_connectors() {
+    local f conn card drv
+    for f in /sys/class/drm/card*-*/status; do
+        [[ -e "$f" ]] || continue
+        conn="${f%/status}"; conn="${conn##*/}"
+        card="${conn%%-*}"
+        drv="$(basename "$(readlink -f "/sys/class/drm/$card/device/driver" 2>/dev/null)" 2>/dev/null)"
+        printf '%s\t%s\t%s\n' "$conn" "$(cat "$f" 2>/dev/null || echo '?')" "${drv:-?}"
+    done | sort
+}
+
+snapshot_thunderbolt() {
+    find /sys/bus/thunderbolt/devices/ -mindepth 1 -maxdepth 1 -printf '%f\n' 2>/dev/null | sort
+}
+
+# Prompts for a physical action and waits. Returns 1 if the user skips or there is no
+# terminal to prompt on, so the caller can degrade instead of hanging forever.
+ask_action() {
+    local msg="$1" reply
+    if [[ ! -t 0 ]]; then
+        echo "  No terminal on stdin — cannot run the interactive dock test."
+        return 1
+    fi
+    printf '\n\033[1;33m>>> ACTION NEEDED: %s\033[0m\n' "$msg"
+    printf '    Press ENTER when done  (or type  s  then ENTER to skip the dock test): '
+    read -r reply || return 1
+    [[ "$reply" =~ ^[sS] ]] && return 1
+    printf '    Waiting 3s for the kernel to notice the change...\n'
+    sleep 3
+    return 0
+}
+
+
+# ---------------------------------------------------------------------------
+# Sourcing guard. `source`ing this file defines the helpers and stops, so the diff and
+# verdict logic can be unit-tested without root, without apt, and without real hardware.
+# Everything below this line is the actual run.
+# ---------------------------------------------------------------------------
+# shellcheck disable=SC2317  # reachable only when sourced, which shellcheck cannot see
+if [[ "${BASH_SOURCE[0]}" != "${0}" ]]; then
+    return 0
+fi
+
 INSTALL=1
-[[ "${1:-}" == "--no-install" ]] && INSTALL=0
+DOCK_TEST=1
+for arg in "$@"; do
+    case "$arg" in
+        --no-install)     INSTALL=0 ;;
+        --skip-dock-test) DOCK_TEST=0 ;;
+        -h|--help)
+            sed -n '2,30p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+            exit 0 ;;
+        *) echo "unknown option: $arg" >&2; exit 2 ;;
+    esac
+done
 
 if [[ $EUID -ne 0 ]]; then
     echo "This script needs root: smartctl reads the drives directly, and apt installs packages." >&2
@@ -51,8 +109,6 @@ fi
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 warnings=()
-
-say() { printf '\n\033[1m== %s ==\033[0m\n' "$1"; }
 
 # ---------------------------------------------------------------------------
 # 1. Install the two missing tools
@@ -177,22 +233,111 @@ fi
 echo
 echo "--- displays / docking ---"
 # The dock question is really "which GPU owns the external output", because that decides
-# whether an external monitor survives an NVIDIA driver problem the way the internal panel does.
-for f in /sys/class/drm/card*-*/status; do
-    conn="${f%/status}"; conn="${conn##*/}"
-    st="$(cat "$f" 2>/dev/null || echo '?')"
-    card="${conn%%-*}"
-    drv="$(basename "$(readlink -f "/sys/class/drm/$card/device/driver" 2>/dev/null)" 2>/dev/null || echo '?')"
-    printf '%-18s %-12s driver=%s\n' "$conn" "$st" "$drv"
+# whether a docked external monitor survives an NVIDIA driver problem the way the internal
+# panel does. Answering it needs two observations, so this walks you through both.
+echo "Current connector state:"
+snapshot_connectors | while IFS=$'\t' read -r conn st drv; do
+    printf '  %-18s %-13s driver=%s\n' "$conn" "$st" "$drv"
 done
+
 if command -v boltctl >/dev/null 2>&1; then
     echo "thunderbolt:"; boltctl list 2>/dev/null | sed 's/^/  /' | head -20
 elif [[ -d /sys/bus/thunderbolt/devices ]]; then
-    echo "thunderbolt devices: $(find /sys/bus/thunderbolt/devices/ -mindepth 1 -maxdepth 1 -printf '%f ' 2>/dev/null)"
+    echo "thunderbolt devices: $(snapshot_thunderbolt | tr '\n' ' ')"
 else
     echo "thunderbolt: no bus present"
 fi
-echo "NOTE: run this once UNDOCKED and once DOCKED — the diff names the dock's connector."
+
+if [[ $DOCK_TEST -eq 0 ]]; then
+    echo
+    echo "Dock test skipped (--skip-dock-test)."
+    warnings+=("dock test skipped: which GPU drives the external monitor is still unknown")
+else
+    echo
+    echo "Dock test: two observations, undocked then docked. The difference names the"
+    echo "connector your dock drives, and therefore which GPU an external monitor needs."
+
+    dock_ok=1
+    undocked_conn=""; undocked_tb=""
+    if ask_action "UNDOCK the laptop — unplug the docking station and any external monitor cable."; then
+        undocked_conn="$(snapshot_connectors)"; undocked_tb="$(snapshot_thunderbolt)"
+        echo "    Recorded the undocked state."
+    else
+        dock_ok=0
+    fi
+
+    docked_conn=""; docked_tb=""
+    if [[ $dock_ok -eq 1 ]]; then
+        if ask_action "Now DOCK the laptop and make sure the external monitor is powered ON."; then
+            docked_conn="$(snapshot_connectors)"; docked_tb="$(snapshot_thunderbolt)"
+            echo "    Recorded the docked state."
+        else
+            dock_ok=0
+        fi
+    fi
+
+    if [[ $dock_ok -eq 0 ]]; then
+        echo
+        echo "Dock test not completed."
+        warnings+=("dock test not completed: which GPU drives the external monitor is still unknown")
+    else
+        echo
+        echo "Connector changes (undocked -> docked):"
+        appeared=()
+        while IFS=$'\t' read -r conn st drv; do
+            [[ -z "$conn" ]] && continue
+            prev="$(awk -F'\t' -v c="$conn" '$1==c{print $2}' <<<"$undocked_conn")"
+            if [[ "$prev" != "$st" ]]; then
+                printf '  %-18s %s -> %s   (driver=%s)\n' "$conn" "${prev:-absent}" "$st" "$drv"
+                [[ "$st" == "connected" ]] && appeared+=("$conn|$drv")
+            fi
+        done <<<"$docked_conn"
+
+        tb_new="$(comm -13 <(printf '%s\n' "$undocked_tb") <(printf '%s\n' "$docked_tb") | tr '\n' ' ')"
+        [[ -n "${tb_new// /}" ]] && echo "  new thunderbolt devices: $tb_new"
+
+        echo
+        if [[ ${#appeared[@]} -eq 0 ]]; then
+            echo "VERDICT (dock)  : NO new connector came up when docked."
+            echo "                  Either the dock provides no video, the monitor was off, or the"
+            echo "                  link needs longer to train. Re-run and give it a moment before"
+            echo "                  pressing ENTER. This is a real finding for R18, not a script bug."
+            warnings+=("dock provided no new display output — R18 unproven")
+        else
+            for entry in "${appeared[@]}"; do
+                conn="${entry%%|*}"; drv="${entry##*|}"
+                printf 'VERDICT (dock)  : the dock drives %s, owned by driver "%s".\n' "$conn" "$drv"
+                case "$drv" in
+                    nvidia*)
+                        echo "                  That is the NVIDIA GPU. A docked external monitor therefore"
+                        echo "                  DEPENDS on the NVIDIA driver — unlike the internal panel,"
+                        echo "                  which is on the Intel iGPU. Recovery planning must assume a"
+                        echo "                  broken NVIDIA driver costs you the external display." ;;
+                    i915|xe)
+                        echo "                  That is the Intel iGPU — the same driver as the internal"
+                        echo "                  panel. A docked external monitor does NOT depend on the"
+                        echo "                  NVIDIA driver, which is the better outcome for recovery." ;;
+                    *)
+                        echo "                  Unexpected driver; worth reporting." ;;
+                esac
+            done
+        fi
+
+        # Keep the evidence. Connector names are not sensitive, but this lives with the
+        # rest of the capture so it is retained and reviewed as one artifact.
+        if [[ -n "${capture_out:-}" ]]; then
+            dock_file="${capture_out%-raw.md}-dock.md"
+            {
+                echo "# Dock connector map"
+                echo
+                echo "Recorded $(date -u '+%Y-%m-%dT%H:%M:%SZ') by capture-followup.sh"
+                echo
+                echo '## Undocked'; echo '```'; printf '%s\n' "$undocked_conn"; echo '```'
+                echo '## Docked';   echo '```'; printf '%s\n' "$docked_conn";   echo '```'
+            } > "$dock_file" 2>/dev/null && echo && echo "Dock connector map written to: $dock_file"
+        fi
+    fi
+fi
 
 echo
 echo "--- NVMe controllers ---"
