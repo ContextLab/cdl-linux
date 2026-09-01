@@ -1,6 +1,6 @@
 # CDL Linux — Product and Architecture Overview
 
-**Status:** Draft for detailed review · **Revision:** 2 · **Date:** 2026-08-31 · **Repo:** `ContextLab/cdl-linux`
+**Status:** Draft for detailed review · **Revision:** 2.1 · **Date:** 2026-08-31 · **Repo:** `ContextLab/cdl-linux`
 
 A focused coordination appliance for supervising concurrent LLM agent work, delivered as an
 installable Linux distribution.
@@ -16,6 +16,16 @@ installable Linux distribution.
 > four component specs (§7); added a threat model (§5), a traceability matrix (§10), and risk spikes
 > (§9); recorded six new decisions (§3, D26–D31); corrected four claims that were wrong or
 > overstated (§17.3).
+>
+> **Revision 2.1 changes** (a focused correction pass, not a rewrite): split the release into three
+> tiers so subsystems stop being launch-blocking all at once (§2.2, D32); made local and ssh+nohup
+> the only required job backends, with cloud and HF Jobs as optional adapters gated on a named
+> provider and confirmed funding (D30, §16.4); gave spend controls an owner (D33, DR12); corrected
+> spike 1, where option C could not satisfy its own pass condition (§9, D34); corrected the threat
+> model's overstated T1 residual and its treatment of worktrees as a security boundary, and added
+> six agent-specific threats (§5); named the sshd startup design as a sub-problem (§7); fixed the M0
+> committed-versus-gitignored contradiction (§6); added M3's restore boundary (§6); and tightened
+> eight acceptance tests that did not fully test their requirements (§10).
 
 ---
 
@@ -108,26 +118,42 @@ most consequential requirement in the document. It promotes from "precautionary"
 the port allocation registry, per-agent systemd slices, the `systemd-oomd` override, GPU admission
 control, and `cdl status` as a real supervisory surface rather than a convenience.
 
-### 2.2 In scope for v1
+### 2.2 Release tiers (D32)
 
-| Capability | Notes |
-|-|-|
-| Ubuntu 26.04 LTS base, pinned | D19 |
-| Encrypted striped storage with snapshots | RAID0 → LUKS2 → LVM → btrfs (D4/D15, D7) |
-| **Hibernation, validated on hardware** | Launch requirement (D29), not an experiment |
-| Single fullscreen terminal session | cage + kitty + zellij, **autologin not committed** (§12) |
-| macOS/Cmd keybinding layer | Generated from one source table (§8) |
-| Agent orchestration | Worktree seeding, `cdl-agent@.service`, `cdl status` |
-| **Full job layer** | submit / list / status / logs / cancel / artifacts / reconcile (D30) |
-| Job backends | local, ssh+nohup (GPU host), cloud, HF Jobs |
-| Provider configuration | User-scoped, validated, with `cdl doctor` |
-| Local inference | llama.cpp / Ollama / llama-swap, GPU admission control |
-| Remote access | OpenSSH bound to the tailnet; no public ports |
-| Backup | restic → append-only REST server, **with a tested restore** |
-| NVIDIA driver + CUDA + PyTorch | Driver on ISO, CUDA at first boot |
-| Emacs, croft, LaTeX, text browser, VPN, wifi | Original requirements R3, R12, R14, R15, R8 |
-| Docs, on-disk and published | MkDocs + VHS screenshot regression |
-| Remix ISO | D22, accepted by fresh-wipe install (D31) |
+Revision 2 narrowed the implementation *sequence* but not the release *scope*, which left every
+subsystem able to become launch-blocking simultaneously. Three named targets fix that:
+
+- **Usable alpha** (M1–M2) — the smallest thing that answers whether the product thesis survives
+  contact with implementation. This is what the next several weeks are for.
+- **Release candidate** (M3–M4) — adds the custom storage stack, hibernation, and the ISO.
+- **Product v1** — the release candidate, accepted by the fresh-wipe gate (D31) and published.
+
+**A capability may only block the milestone its tier assigns it to.** Anything marked optional must
+not gate a milestone, and any subsystem that starts behaving as though it were alpha-blocking when
+the table says otherwise is scope creep to be pushed back.
+
+| Capability | Alpha (M1–M2) | RC (M3–M4) |
+|-|-|-|
+| Ubuntu 26.04 LTS base, pinned | ✓ stock install | ✓ custom install |
+| Terminal session: compositor + kitty + zellij | ✓ | ✓ |
+| macOS/Cmd keybinding layer | ✓ | ✓ |
+| Session security / lock path (T2) | ✓ **alpha-blocking** | ✓ |
+| Worktree seeding and agent supervision | ✓ | ✓ |
+| Job layer, all seven verbs | ✓ | ✓ |
+| Job backends: **local + ssh+nohup** | ✓ **required** | ✓ |
+| Job backends: cloud, HF Jobs | — optional adapters | ✓ before M4, each gated on §16.4 |
+| Job backend: Slurm | — | designed, ships disabled (§16.1) |
+| Spend controls, best-effort (D33) | ✓ | ✓ |
+| Provider configuration + `cdl doctor` | ✓ | ✓ |
+| Local inference + GPU admission | ✓ | ✓ |
+| Remote access over the tailnet | ✓ | ✓ |
+| Backup + **tested restore** | ✓ | ✓ |
+| NVIDIA driver + CUDA + PyTorch | ✓ | ✓ |
+| Emacs, croft, LaTeX, text browser, VPN, wifi | ✓ | ✓ |
+| Encrypted striped storage + snapshot rollback | — | ✓ |
+| Hibernation validated on hardware (D29) | — | ✓ |
+| Reproducible remix ISO + apt repository | — | ✓ |
+| Documentation | on-disk only | ✓ published |
 
 ### 2.3 Explicit non-goals for v1
 
@@ -178,8 +204,11 @@ review on 2026-08-31. All were confirmed by the user.
 | **D27** | **Backup target is the user's QNAP/TrueNAS**, which exposes SSH and can run containers. Primary design: `restic` → `rest-server --append-only` in a container on the NAS. Fallbacks in priority order: restic over SFTP; restic via an rclone SMB remote. A capability probe resolves which, before any code. |
 | **D28** | **Working shape: 5–10 API agents + 1–2 local agents + 2–4 GPU-host agents.** See §2.1. |
 | **D29** | **Hibernation is a launch requirement**, not an experiment. It must be validated on the real machine, including recovery from a failed resume, before M3 is complete. |
-| **D30** | **Full job layer in v1** — the complete verb set across local, ssh, cloud and HF Jobs backends. The Slurm backend is designed and specified but ships disabled until its auth is testable (§16.1). |
+| **D30** | **Full job layer** — the complete verb set (submit / list / status / logs / cancel / artifacts / reconcile). **Required backends are local and ssh+nohup**; those two alone gate the alpha. Cloud and HF Jobs are **optional adapters** that must land before M4, and neither may be written until its provider is named and its funding confirmed (§16.4). Slurm is designed and specified but ships disabled until its auth is testable (§16.1). |
 | **D31** | **Acceptance is a fresh install onto a fully wiped machine.** Nothing hand-configured on the working machine counts as done until it exists as a package or declarative artifact in the repo. |
+| **D32** | **Three release tiers** — usable alpha (M1–M2), release candidate (M3–M4), product v1. A capability blocks only the milestone its tier assigns it (§2.2). |
+| **D33** | **Spend controls are owned by `cdl-agent-lifecycle`**, best-effort but not unowned. Minimum: per-job declared budget, per-provider concurrency ceiling, global daily warning and hard-stop where the API permits, runtime and token accounting, cost visible in `cdl status`, and defined behaviour when a provider exposes no reliable cost data. |
+| **D34** | **A compositor with a real session-lock protocol is the default answer to T2.** Minimal sway (no panel, launcher, decorations or desktop services) is preferred over cage unless spike 1 finds a cheaper path that actually passes. A proven security protocol outranks "technically not a window manager". |
 
 ### 3.1 Rejected alternatives and why
 
@@ -223,14 +252,31 @@ Full controls and their failure behaviour live in `cdl-security-and-recovery`.
 
 | # | Threat | In v1 scope | Control | Residual risk |
 |-|-|-|-|-|
-| T1 | Opportunistic theft, machine powered off | Yes | LUKS2 FDE, passphrase at every boot (D7). Swap inside the container, so RAM contents including API keys never hit plaintext disk. | None material. `/boot` and ESP are unencrypted but hold no secrets (D26 removes the tailnet key that would have lived there). |
+| T1 | Opportunistic theft, machine powered off | Yes | LUKS2 FDE, passphrase at every boot (D7). Swap inside the container, so RAM contents including API keys never hit plaintext disk. | **Low, conditional on a strong passphrase.** Residual: passphrase strength and reuse; offline guessing against the LUKS header; metadata exposed through the unencrypted ESP and `/boot`; boot tampering if the machine is later recovered and reused; and any credential copied *outside* the encrypted volume — backups, paper notes, the user's Mac. Revision 2 said "none material", which was wrong. |
 | T2 | Opportunistic access, machine powered on and unattended | Yes | **Currently unresolved.** Autologin plus plaintext keys means opening the lid yields a shell with live credentials; FDE protects only a powered-off machine. | **The live gap in the design.** See §12; blocks the autologin decision. |
 | T3 | Malicious local process reading provider keys | Yes | Keys in `~/.config/cdl/providers.env`, mode `0600` — **not** `/etc`, which the `ollama` system user and every service unit could read. | Any process running *as the user* can still read them. Accepted: this is a single-user machine. |
-| T4 | Compromised or misbehaving agent destroying work | Yes | Worktree isolation per agent; bubblewrap process sandbox with an AppArmor profile; `Restart=no`; append-only backup so history cannot be rewritten. | An agent can still push to remotes and spend provider credit. Spend controls remain an open product gap (§16.3). |
+| T4 | Compromised or misbehaving agent destroying local work | Yes | Bubblewrap process sandbox with an AppArmor profile; `Restart=no`; append-only backup so history cannot be rewritten. **Worktrees are *not* part of this control** — see below. | Sandbox escape; anything the agent is legitimately allowed to reach. |
+| T4a | Agent exfiltrates secrets over permitted network egress | Yes | **No control in v1 as designed.** The sandbox's network policy is the only possible boundary and is currently unspecified. | **Open.** `cdl-agent-lifecycle` must define an egress policy, or this is accepted explicitly rather than by omission. |
+| T4b | Untrusted repository content as instructions (prompt injection) | Yes | None mechanical. An agent reads the repo it works on, and that content reaches the model. | **Open.** Mitigation is procedural: treat any repo an agent touches as trusted input, and say so. |
+| T4c | Destructive push to a git remote | Yes | Append-only backup preserves local history; the remote is not protected by anything on this machine. | **Open.** Candidate: deny-by-default push credentials, or branch protection server-side. |
+| T4d | Prompt and source content leaked to model providers | Partial | Provider choice is the only lever. Local models keep content on the machine. | Accepted for API-backed agents; this is what using a provider means. Worth stating so it is a choice, not a surprise. |
+| T4e | Agent reads other worktrees, `$HOME`, or other agents' state | Yes | Bubblewrap filesystem policy — **currently unspecified**. | **Open, and the reason worktrees must not be miscounted as isolation.** |
+| T4f | One credential set shared by every agent | Yes | Provider keys live in one user-scoped file readable by every agent process. | **Open.** Per-agent credential scoping is not designed. Decide whether it is worth the complexity. |
 | T5 | Stolen backup credential | Yes | `rest-server --append-only`: verbatim, it "allows creation of new backups but prevents deletion and modification of existing backups" and "prevents an attacker from wiping your server backups when access is gained to the server being backed up." | An attacker with the laptop can still *read* and decrypt backup history, and can append garbage. Retention pruning must therefore run from the NAS side, not the laptop. |
 | T6 | Supply-chain compromise | Partial | Pinned archive snapshot, per-ISO package manifest, checksummed vendored binaries, pinned pacscript commits. | Pacstall source builds and `cargo install` pull unaudited upstream code. Reduced, not eliminated. |
 | T7 | Evil maid — physical access to unencrypted `/boot`/ESP | **No — explicitly out of scope** | Secure Boot raises the bar. `/boot` is unencrypted and unmeasured; an attacker with physical access can modify the initramfs to capture the passphrase. | Accepted and stated. Against a targeted adversary with physical access, nothing in an unencrypted initramfs is trustworthy. |
 | T8 | Network attacker | Yes | No public ports, ever. OpenSSH bound to the tailnet interface; firewall default deny except `tailscale0`. Key-only auth. | Compromise of the tailnet identity. |
+
+**Worktrees are collision isolation, not a security boundary.** They stop concurrent agents
+corrupting each other's git index — which is exactly what the 24/100-commit finding measured — and
+they do nothing else. An agent in a worktree can read every other worktree, `$HOME`, and the
+provider key file. The security boundary is bubblewrap plus a network policy, both of which
+`cdl-agent-lifecycle` must specify. Revision 2 listed worktrees as a T4 control; that was a category
+error and is corrected above.
+
+**The T4a–T4f rows are mostly open.** That is deliberate: an agent threat model with honest gaps is more
+useful than one that lists a control for every row. Each open row is an input to
+`cdl-agent-lifecycle` and `cdl-security-and-recovery`, and none may be closed by assertion.
 
 **Note on T2 and D26 together.** Declining remote unlock removes an attack surface (no tailnet
 credential on unencrypted `/boot`) at the cost of availability after an unattended reboot. That
@@ -248,8 +294,15 @@ principle is why ISO work is last, not first.
 ### M0 · Hardware capture — *do this now*
 
 - **Entry:** none. Independent of every other decision.
-- **Deliverable:** `scripts/capture-hardware.sh` output committed to `notes/hardware/`.
-- **Exit:** every fact in §15 recorded, including firmware settings that require a reboot to read.
+- **Deliverable:** raw capture stored locally in the **gitignored** `notes/hardware/`, plus a
+  **redacted profile committed as `notes/hardware/tensorbook-profile.md`**. The raw output carries
+  serial numbers, MAC addresses, UUIDs and hostnames and must not be committed (§15); the profile
+  carries the facts the design needs, with identifiers removed.
+- **Retain the raw capture off-machine too** — the Tensorbook is wiped three times across M2–M4, and
+  a capture that lives only on it is a capture you lose.
+- **Exit:** every fact in §15 recorded, including the firmware settings that require a reboot to
+  read, and an explicit go/no-go recorded for each of: Intel VMD/RST, dual-NVMe striping viability,
+  GPU and display topology, supported sleep states, and RAM-derived swap sizing.
 - **Why first:** one-way. Every fact becomes unobtainable after installation, and at least six
   design decisions currently rest on assumptions rather than measurements (§15).
 
@@ -288,6 +341,22 @@ principle is why ISO work is last, not first.
 - **Note:** this milestone destroys the M2 installation. The M2 backup and restore must be proven
   *before* it starts — that is the whole point of testing restore in M2.
 
+**The restore boundary, stated explicitly.** A full `$HOME` restore would silently undo D31 by
+reinstating configuration the repository never learned to reproduce. So M3's restore is partial by
+design:
+
+| Category | M3 treatment | Why |
+|-|-|-|
+| Work: repositories, worktrees, documents | **Restored** | This is the thing backup exists for |
+| Job and agent registry state | **Restored** | Durable supervision across a reinstall is a product claim; if it cannot survive this, say so |
+| Application state and build artifacts (venvs, caches, `node_modules`) | **Not restored** — regenerated | They are derived. Regenerating proves the seeding hook works |
+| Model weights | **Not restored** — re-downloaded from the excluded-weights manifest | They are excluded from backup by design |
+| System and user *configuration* | **Not restored — reproduced from the repo** | This is the D31 gate. Anything that only comes back by restore is missing declarative configuration, and that is the defect M3 is designed to expose |
+| Secrets: provider keys, restic repo password, SSH identity | **Re-enrolled, not restored** | Re-running enrollment proves the first-boot path works and rotates credentials that existed on a machine now wiped |
+
+**Before M3 starts, record which machine holds the only copy of the hardware knowledge** (the M0
+capture) and confirm it exists off-machine.
+
 ### M4 · Remix ISO
 
 - **Entry:** M3 exit.
@@ -308,8 +377,8 @@ commissioning brief for each.
 | Spec | Owns | Must resolve |
 |-|-|-|
 | **`cdl-install-and-packaging`** | Live ISO build toolchain; subiquity integration and the custom storage recipe; package manifests, sources and pinning; vendored binaries (zellij, croft); Secure Boot; first-boot provisioning; installed-system updates; the project's own apt repository; reproducibility; ISO size budget; **the documentation pipeline** | Review finding #1. Also the apt-ownership/conflict policy (apt vs Pacstall vs cargo vs vendored), `unattended-upgrades` on or off, and third-party repo pinning in `/etc/apt/preferences.d` |
-| **`cdl-security-and-recovery`** | Threat model in full; secrets at rest and leakage during install; remote access (bind addresses, firewall, key enrollment and rotation, mosh); snapshot and rollback design; backup schedule, retention, encryption, failure notification, consistency, restore verification, bare-machine recovery, RPO/RTO | Review findings #2, #4, #5. Also the D26 recovery posture and the T2 session-lock gap |
-| **`cdl-agent-lifecycle`** | Agent state machine; PTY allocation, attach/detach, input injection; blocked/waiting/complete detection; exit status; prompt and launch-command recording; cancellation; worktree and service reconciliation; resume without replay; bubblewrap sandbox; port allocation registry; GPU admission; `cdl status` contract; the full job layer and its registry schema | Review findings #6, #7. Also the three-location model from D28 and the Slurm extension plan (D30) |
+| **`cdl-security-and-recovery`** | Threat model in full, including every open T4a–T4f row; secrets at rest and leakage during install; remote access; snapshot and rollback design; backup schedule, retention, encryption, failure notification, consistency, restore verification, bare-machine recovery, RPO/RTO | Review findings #2, #4, #5. Also the D26 recovery posture, the T2 session-lock gap, and the **sshd startup design** below |
+| **`cdl-agent-lifecycle`** | Agent **and job** state machines; PTY ownership and attachment protocol; blocked/waiting/complete detection; exit status; prompt and launch-command recording; cancellation; worktree ownership and reconciliation after crashes; resume without replay; **sandbox filesystem and network policy** (closing T4a and T4e); port allocation registry; SQLite schema and migrations; GPU admission; **spend controls per D33**; provider and global concurrency limits; `cdl status` output contract; local and ssh backend contracts | Review findings #6, #7. Also D28's three-location model, D30's backend split, and the Slurm extension plan. **Write this one first** — it holds the differentiating functionality and drives M1. Limit its first executable slice to one local interactive agent, then prove spike 2 |
 | **`cdl-first-boot-and-environment`** | First-run experience; provider key entry, validation and leakage avoidance; model installation, quota and GC; offline behaviour; CUDA at first boot; Emacs configuration and LLM integration; croft packaging and pinning; python/PyTorch/HF; LaTeX profile; text browser; VPN; wifi; power, lid, battery and thermal policy; keybinding generation | Review finding #8 |
 
 **Documentation, carried forward from revision 1 so the restructure does not lose it.** MkDocs,
@@ -321,6 +390,20 @@ exist. **VHS cannot capture everything** — it renders inside its own pty and p
 photograph GRUB, the installer, the bare VT, or the boot sequence. Those need QEMU framebuffer
 capture: a different tool, and a documented gap rather than an oversight. **Docs ship on-disk**, because
 a documentation site is useless exactly when it is most needed: no wifi, no boot.
+
+**The sshd startup design is a named sub-problem, not a one-line setting.** "OpenSSH bound to the
+tailnet interface" is right in intent and fragile in practice: the tailnet address may not exist when
+sshd starts, and a `tailscaled` restart can change interface readiness — while remote access is the
+only way back into a machine whose display has broken. The spec must compare four approaches and
+pick one with stated failure behaviour:
+
+1. Listen on all interfaces, enforce the boundary purely in firewall rules
+2. Bind explicitly, with systemd ordering and a restart policy that survives `tailscaled` restarts
+3. A socket unit tied to tailnet readiness
+4. Tailscale SSH — noting that restarting the daemon terminates existing Tailscale SSH sessions
+
+The acceptance test must probe **each non-tailnet interface by name** — physical LAN and any
+public-facing address — not an unspecified "from outside".
 
 ### 7.1 Where revision 1's content went
 
@@ -345,7 +428,7 @@ must reconcile against it before it is called complete.
 | §12 Branding and theme | §13, with the contrast claim corrected |
 | §13 Validation ladder | §14, with the hibernation claim corrected |
 | §14 Pre-wipe hardware capture | §15, expanded from 4 commands to 27 plus firmware items |
-| §15 Open items | §16. Item 15.1 (backup target) closed by D27; 15.4 (reproducible builds) → `cdl-install-and-packaging` and DR11; 15.5 (spend controls) survives as §16.3, still unowned |
+| §15 Open items | §16. Item 15.1 (backup target) closed by D27; 15.4 (reproducible builds) → `cdl-install-and-packaging` and DR11; 15.5 (spend controls) **closed by D33** — owned by `cdl-agent-lifecycle`, tested as DR12 |
 | §16 Evidence standards | §17, with qualifications moved inline to the claims themselves |
 
 ---
@@ -449,14 +532,20 @@ The swaylock sub-question is **already answered and needs no spike**: cage imple
 `ext-session-lock-v1` nor layer-shell (§4). What the spike must decide is which of three designs to
 adopt:
 
-| Option | Mechanism | Cost |
+| Option | Mechanism | Verdict |
 |-|-|-|
-| **A. Different compositor** | Replace cage with one that implements `ext-session-lock-v1` (sway or labwc configured with no bars or decorations) | A real window manager with a config file; more surface area than a 77 kB kiosk |
-| **B. Hibernate as the lock** | Lid close and idle trigger **hibernation**, not suspend. Resume requires the LUKS passphrase, so it is a genuine credential barrier | Slow (writes ≥ RAM plus ~16 GB of preserved VRAM). Depends entirely on D29 succeeding. Elegant coupling if it does |
-| **C. No autologin** | Conventional authenticated getty login; cage started from the user's profile; no in-session locker | Less elegant, much safer failure mode. Does not protect a session already open |
+| **A. Different compositor** — *the default (D34)* | Replace cage with one implementing `ext-session-lock-v1`: minimal sway or labwc with no panel, launcher, decorations or desktop services | **Can satisfy the pass condition.** Costs a config file and more surface area than a 77 kB kiosk. A proven security protocol outranks kiosk purity |
+| **B. Hibernate as the lock** | Lid close and idle trigger **hibernation**, not suspend; resume requires the LUKS passphrase, a genuine credential barrier | **Cannot gate the alpha.** Hibernation is not validated until M3 (D29), so making session security depend on it couples the alpha to the highest-risk hardware feature. Viable as a *second* layer later |
+| **C. No autologin** | Conventional authenticated getty login; the compositor starts from the user's profile; no in-session locker | **Insufficient alone.** It protects the boot path, not an already-open session, so by itself it cannot meet the pass condition below. It is a necessary component, not a solution |
 
-**Pass condition:** one option demonstrated end to end, including what happens when it fails.
-**Until then, autologin is not committed** and threat T2 stays open.
+**Option C needs a partner mechanism** to close T2 — one of: terminate the session on lid close or
+idle; switch to a locked login VT while killing the credentialed session; or a compositor with real
+session-lock support, which is option A. Revision 2 listed C as a standalone option; that was wrong,
+because the pass condition below is about an open session and C does not touch one.
+
+**Pass condition:** an unattended lid-open does not yield a shell with live credentials, demonstrated
+end to end — including what happens when the lock component itself crashes, and how tty2 recovery
+still works. **Until this passes, autologin is not committed** and threat T2 stays open.
 
 ### Spike 2 · Durable interactive agent
 
@@ -489,31 +578,31 @@ it, and the test that proves it. Rows marked ⚠ are those revision 1 dropped or
 | R2 | Two drives as one ~2 TB volume | install-and-packaging §storage | M3 | `lsblk` shows the four-layer stack; `df` shows a single ~1.85 TiB filesystem |
 | R3 ⚠ | emacs + croft preinstalled | first-boot-and-environment §editors | M1 | Both launch; croft renders Nerd Font glyphs not `[?]`; **Emacs LLM integration (gptel/ellama) configured and answering** |
 | R4 | macOS-native keybindings | agent-lifecycle §keybindings (generation); overview §8 | M1 | Generated configs diffed against the source table in CI; Cmd-S/Z/C verified not to emit XOFF/SIGTSTP/SIGINT |
-| R5 | Everything a TUI; no GUI | overview §12; install §manifest | M1 | Manifest contains no display manager, no browser engine, no notification daemon |
+| R5 | Everything a TUI; no GUI | overview §12; install §manifest | M1 | Manifest contains no display manager, no browser engine, no notification daemon — **and the same assertion holds over the installed package closure, since dependencies can pull in what the manifest excludes** |
 | R6 | Native CUDA/NVIDIA | first-boot-and-environment §cuda | M2 | `nvidia-smi` and a PyTorch CUDA tensor op on the real GPU |
-| R7 ⚠ | ollama + LM Studio; models chosen at install; easy to add later | first-boot-and-environment §models | M2 | Model picker gated on measured VRAM; **disk quota and GC policy enforced — a pull that would exceed the ceiling is refused** |
+| R7 ⚠ | ollama + LM Studio; models chosen at install; easy to add later | first-boot-and-environment §models | M2 | Model picker gated on measured VRAM; disk quota and GC policy enforced — a pull that would exceed the ceiling is refused; **and the LM Studio fetch-on-demand helper runs the vendor installer so the user accepts the license directly, verified end to end (§4)** |
 | R8 ⚠ | Wifi drivers + modern conveniences | first-boot-and-environment §network, §power | M2 | Wifi connects via nmtui; **lid-close during a running agent does not suspend; critical battery hibernates rather than powering off** |
-| R9 | LAN backup | security-and-recovery §backup | M2 | A restore drill reproduces `$HOME` onto a clean machine |
+| R9 | LAN backup | security-and-recovery §backup | M2 | A restore drill onto a clean machine reproduces **work, system configuration, repository keys, SSH identity, restic credentials and registry state** — not merely `$HOME`. Secrets may be re-enrolled rather than restored, but the procedure must be exercised (§6, M3 restore boundary) |
 | R10 ⚠ | Full apt support | install-and-packaging §apt-policy | M2 | Ownership policy documented per package class; third-party pins in `/etc/apt/preferences.d`; `unattended-upgrades` posture decided and tested |
 | R11 | python + PyTorch + HF for CUDA | first-boot-and-environment §python | M2 | CUDA tensor op; HF cache location and ceiling configured |
 | R12 ⚠ | LaTeX distribution | first-boot-and-environment §latex | M2 | A document builds; **profile and installed size explicitly chosen against the ISO budget** |
 | R13 ⚠ | Full docs with screenshots | install-and-packaging §documentation | M4 | VHS PNG diffs pass in CI; docs present on-disk offline; **boot/installer/GRUB captures produced by QEMU framebuffer, not VHS** |
 | R14 ⚠ | Text-based browser | first-boot-and-environment §browser | M1 | w3m or lynx installed. **Must be non-JS by capability — Browsh and Carbonyl are excluded; Carbonyl is Chromium in a terminal, with WebGL and video** |
 | R15 ⚠ | VPN support | first-boot-and-environment §vpn | M2 | GlobalProtect connects headlessly and survives a multi-hour unattended run, **or** an off-VPN bastion path is documented instead |
-| R16 | Easy installable-USB creation | install-and-packaging §distribution | M4 | Ventoy drag-and-drop; `dd` and Rufus paths documented and tested |
+| R16 | Easy installable-USB creation | install-and-packaging §distribution | M4 | **A physical machine boots the ISO from a Ventoy stick** — compatibility assumed until demonstrated. Plus `dd` and Rufus paths documented and tested |
 | R17 | Fira Code with ligatures | overview §12 | M1 | Ligatures render in kitty; icon glyphs come from the fallback, not a patched font |
 | DR1 | Several agents concurrently (D8/D28) | agent-lifecycle | M2 | The full D28 working shape runs overnight unattended |
-| DR2 | Long-lived unattended sessions (D9) | agent-lifecycle §supervision | M2 | Agent survives logout, reboot of the terminal, and network loss |
+| DR2 | Long-lived unattended sessions (D9) | agent-lifecycle §supervision | M2 | Agent survives logout, **termination and restart of kitty/zellij** (not a machine reboot — D26 means a reboot needs the passphrase), and network loss |
 | DR3 | Remote job launching (D10/D30) | agent-lifecycle §jobs | M2 | All seven verbs against the GPU host; reconcile recovers a job whose launcher died |
-| DR4 | Remote access (D11) | security-and-recovery §remote-access | M2 | SSH from the Mac over the tailnet; `nmap` from outside shows no open port |
+| DR4 | Remote access (D11) | security-and-recovery §remote-access | M2 | SSH from the Mac over the tailnet succeeds; **every non-tailnet interface enumerated by name and probed** — physical LAN and any public address — shows no listening service. Plus the sshd startup behaviour survives a `tailscaled` restart (§7) |
 | DR5 | Snapshot + rollback (D5) | security-and-recovery §snapshots | M3 | A deliberate bad update is rolled back from the boot menu |
 | DR6 | FDE (D7) | install-and-packaging §storage | M3 | Passphrase required at boot; swap inside the container verified |
 | DR7 ⚠ | Hibernation (D25/D29) | install-and-packaging §storage; environment §power | M3 | **Ten consecutive hibernate/resume cycles on hardware, plus documented recovery from a failed resume** |
 | DR8 ⚠ | Screen lock / session security (T2) | security-and-recovery §session | M1 | Spike 1 option demonstrated; unattended lid-open does not yield a live-credential shell |
 | DR9 ⚠ | First-run experience | first-boot-and-environment §first-run | M2 | First boot on a fresh install is resumable and idempotent; an interrupted provisioning run recovers |
 | DR10 ⚠ | Offline behaviour | first-boot-and-environment §offline | M2 | Machine boots, opens a session and reports provider unavailability clearly with no network |
-| DR11 | Reproducible build | install-and-packaging §reproducibility | M4 | Two builds of one commit produce identical ISOs |
-| DR12 ⚠ | Spend controls | *unowned — see §16.3* | — | — |
+| DR11 | Reproducible build | install-and-packaging §reproducibility | M4 | **Target:** two builds of one commit produce byte-identical ISOs. **Fallback standard, if signing or bootstrap artifacts make that infeasible:** identical package manifests and normalised filesystem contents, with every remaining difference enumerated and explained |
+| DR12 | Spend controls (D33) | agent-lifecycle §budget | M2 | A job exceeding its declared budget stops; the per-provider concurrency ceiling is enforced; a daily threshold warns and a hard stop halts new work where the API permits; `cdl status` shows cost; behaviour is defined and tested for a provider exposing no reliable cost data |
 
 ---
 
@@ -671,58 +760,47 @@ possible in hosted CI and requires the Tensorbook enrolled as a self-hosted runn
 ## 15. Pre-wipe hardware capture
 
 One-way, and the reason M0 comes first. Every fact becomes unobtainable after installation.
-Runnable script: `scripts/capture-hardware.sh`. Output belongs in `notes/hardware/`, **which is
-gitignored** — captures contain serial numbers, MAC addresses, filesystem UUIDs and hostnames, and
-D1 commits to keeping personal data out of a publishable artifact. Quote redacted *facts* into
-specs ("two 1 TB NVMe drives, both 512e/4Kn"), never raw command output.
 
-Revision 1's list was too narrow for the number of decisions that depend on it. Full list:
+> **`scripts/capture-hardware.sh` is authoritative for the command list.** Revision 2 duplicated the
+> commands here, which immediately drifted from the script. This section now states the *facts
+> required* and the decisions each one gates; the script states how they are obtained, and the two
+> cannot disagree because only one of them lists commands.
 
-```bash
-# identity and firmware
-sudo dmidecode -s system-product-name; sudo dmidecode -s system-version
-sudo dmidecode -s bios-version; sudo dmidecode -s bios-release-date
-mokutil --sb-state                       # Secure Boot state
-ls -l /dev/tpm* 2>/dev/null; sudo systemd-cryptenroll --tpm2-device=list
+**Handling.** Raw output goes to `notes/hardware/`, **which is gitignored** — it contains serial
+numbers, MAC addresses, filesystem UUIDs and hostnames, and D1 commits to keeping personal data out
+of a publishable artifact. The committed artifact is `notes/hardware/tensorbook-profile.md`: redacted
+*facts* ("two 1 TB NVMe drives, both 512e/4Kn"), never raw command output. Keep a copy of the raw
+capture off-machine; the Tensorbook is wiped three times across M2–M4.
 
-# storage — decides whether striping is even coherent
-sudo nvme list
-lsblk -e7 -o NAME,MODEL,TRAN,ROTA,PHY-SEC,LOG-SEC,SIZE,FSTYPE,MOUNTPOINT
-sudo smartctl -a /dev/nvme0n1; sudo smartctl -a /dev/nvme1n1
-sudo fdisk -l; sudo blkid
+### 15.1 Facts required, and what each one decides
 
-# GPU, display topology and driver state
-nvidia-smi -q                            # GPU, VRAM, driver, power, thermal
-lspci -nnk                               # every device WITH bound driver
-ls /sys/class/drm/                       # connector and provider topology
-xrandr --listproviders 2>/dev/null || true
+| Fact | Decides | Go/no-go |
+|-|-|-|
+| Exact model and BIOS version **and release date** | Which documented chassis quirks apply; whether a firmware update exists | |
+| Secure Boot state, and whether it can be disabled | Signed-module requirement; whether MOK enrollment joins the interactive install steps | |
+| TPM presence — device nodes **and** `systemd-cryptenroll --tpm2-device=list` | Gates every TPM option. D7 rejected TPM auto-unlock, so this is recorded for completeness while it is knowable | |
+| **Both drives NVMe, or one SATA?** | The entire striping design. At least one documented Tensorbook shipped 1 TB NVMe + 1 TB M.2 SATA, which would make striping actively harmful | ✅ **go/no-go** |
+| Physical and logical sector sizes | The LUKS `--sector-size 4096` tuning | |
+| SMART wear and error history | Whether either drive is already suspect — decisive under RAID0, where either failure loses everything | ✅ **go/no-go** |
+| **Measured RAM** | Swap size, and therefore the whole LVM layout. Currently assumes 64 GB from a vendor launch post rather than measurement; under D29 this is a launch-requirement input | ✅ **go/no-go** |
+| GPU model, VRAM, driver, power and thermal limits | Local-model picker ceiling; the sustained-load thermal question (§16.5) | |
+| DRM connector and provider topology; which driver is *bound* | Whether the console comes from `i915`/`simpledrm` or `nvidia-drm` — the session and rescue-console design | ✅ **go/no-go** |
+| Supported sleep states (`mem_sleep`, `state`) | Whether hibernation is offered at all, and s2idle vs deep S3 — the root of the known Razer suspend quirks | ✅ **go/no-go** |
+| Battery design capacity and critical-power behaviour | Critical-battery policy; UPower's default chain ends in PowerOff, which on an FDE machine means total session loss | |
+| Wifi chipset and bound driver | The firmware package that must ship on the ISO | |
+| Existing kernel command line | Workarounds already applied to this machine | |
 
-# memory — decides swap size and therefore the whole LVM layout
-free -g; sudo dmidecode -t memory | grep -E 'Size|Speed|Locator'
+### 15.2 Firmware settings — requires a reboot into setup
 
-# power and sleep
-cat /sys/power/mem_sleep; cat /sys/power/state
-cat /sys/class/power_supply/BAT*/energy_full_design 2>/dev/null
-upower -i "$(upower -e | grep BAT)" 2>/dev/null || true
+Not obtainable from a running system, and not optional.
 
-# network
-lspci -nn | grep -Ei 'network|wireless'; lsusb
-iw dev 2>/dev/null; nmcli device status
-
-# current boot configuration
-cat /proc/cmdline; uname -a
-```
-
-**Plus, from firmware (requires a reboot into setup):** whether storage is in **Intel VMD/RST mode**
-(if so and it cannot be disabled, a stock installer sees no disks at all and the project stops), and
-the Chipset setting (Dedicated GPU Only vs Dynamic Display Switch, which decides whether the console
-comes from `i915`/`simpledrm` or from `nvidia-drm`).
-
-**Decisions blocked on this:** swap size (currently assumes 64 GB RAM, from a vendor launch post
-rather than measurement) — and under D29 this is now a launch-requirement input, not a nicety; the
-entire striping design (**at least one documented Tensorbook shipped 1 TB NVMe + 1 TB M.2 SATA**,
-which would make striping actively harmful); the console/display path; the wifi firmware package;
-the thermal envelope for sustained CUDA load.
+- **Intel VMD/RST mode.** ✅ **go/no-go, and the highest-consequence fact here.** If storage is in
+  VMD/RST mode and it cannot be disabled, a stock installer sees no disks at all and the project
+  stops.
+- **Chipset graphics: Dedicated GPU Only vs Dynamic Display Switch.** Decides the console path with
+  the DRM topology above.
+- **Secure Boot: enabled, and can it be disabled?**
+- **Any BIOS password set?**
 
 ---
 
@@ -748,17 +826,35 @@ The name `cdl-linux` contains the adjacent letters "Linux", which
 requires a free, perpetual sublicense for a software mark. Trivially satisfiable; must be filed
 before public release.
 
-### 16.3 Spend controls — unowned
+### 16.3 NAS make and model
 
-An LLM-first distro that collects API keys and ships no budget or
-usage visibility is a genuine product gap, made larger by D28 (up to ~16 concurrent agents). It
-appears in the traceability matrix as DR12 with no owning component. **Decide: v1 feature,
-documented gap, or explicit non-goal.**
+D27 selects the design shape but the capability probe (SSH → container → SFTP → SMB) must run before
+`cdl-security-and-recovery` can be finalised.
 
-### 16.4 NAS make and model
+### 16.4 Cloud provider identity, and whether HF Jobs is funded
 
-D27 selects the design shape but the capability probe (SSH → container →
-SFTP → SMB) must run before `cdl-security-and-recovery` can be finalised.
+**"Cloud" is not a backend.** AWS Batch, RunPod, Lambda Cloud, Modal and a raw cloud VM have
+materially different lifecycle, artifact and billing semantics. D30 requires **exactly one named
+provider** before the cloud adapter is written.
+
+**HF Jobs is entitled but was measured unfunded.** Revision 1 cited the org's `academia` plan and the
+token's `jobs` scope as evidence HF Jobs was "a genuinely available remote compute target." That
+conflates entitlement with availability. Research separately recorded, and this correction rests on
+it: *"HF Jobs 401 in scheduled CI (expired HF_TOKEN) and 402 in manual runs (unfunded account)."* A
+402 is Payment Required — the account is authorised but cannot run jobs.
+
+Before either adapter is written, decide and record:
+
+- The one cloud provider for v1
+- Whether HF Jobs will be funded, or whether the backend is dropped
+- What "artifacts" means for each backend concretely — a path, an object URL, a retention window
+- Which job states are common to all backends and which are backend-specific
+- Cost limits and what cancellation actually guarantees per backend
+- **Whether an unavailable backend may leave the release incomplete, or whether the release simply
+  ships without it**
+
+The check that settles the HF half is a single minimal job submission, which costs money and
+therefore needs the user's consent rather than being run speculatively.
 
 ### 16.5 Sustained thermal load
 
@@ -791,7 +887,9 @@ depending on it:
 
 - the worktree commit experiment (§8); the dm-crypt throughput numbers (§11); the drive-failure
   probability math; the `systemd-oomd` default values (§8); the bubblewrap/AppArmor interaction (§8);
-  the Marotta & Acquisti finding (§1.3).
+  the Marotta & Acquisti finding (§1.3); the **HF Jobs 401/402 results** (§16.4) — load-bearing for
+  dropping HF Jobs from the required backends, and settled by one minimal job submission whenever the
+  user chooses to spend that money.
 
 `notes/` carries the full ledger.
 
@@ -805,3 +903,17 @@ depending on it:
 | 4 | Stage 2 validates "hibernation resume" (r1 §13) | QEMU validates the plumbing, not hibernation in fact. §14 |
 | 5 | "deterministic, non-colliding port block" (r1 §8) | A hash is not non-colliding. Needs detection, a registry, and a lock. §8 |
 | 6 | Worktree and dm-crypt figures narrated as "measured" | Qualified inline as reported. §8, §11, §17.2 |
+
+**Corrections made in revision 2.1**
+
+| # | Revision 2 said | Correction |
+|-|-|-|
+| 7 | T1 residual risk is "none material" (r2 §5) | Overstated. Low *conditional on a strong passphrase*, with five named residuals. §5 |
+| 8 | Worktree isolation is a control against a malicious agent (r2 §5) | Category error. Worktrees are collision isolation; the security boundary is bubblewrap plus network policy. §5 |
+| 9 | Spike 1 option C ("no autologin") is a standalone option (r2 §9) | It cannot satisfy its own pass condition, which concerns an already-open session. It is a component, not a solution. §9 |
+| 10 | "v1" as a single scope (r2 §2.2) | Every subsystem became launch-blocking at once. Split into alpha / RC / product v1. §2.2, D32 |
+| 11 | Job backends "local, ssh+nohup, cloud, HF Jobs" as one commitment (r2 D30) | "Cloud" is not a backend. Only local and ssh+nohup are required; the others need a named provider first. D30, §16.4 |
+| 12 | HF Jobs is "a genuinely available remote compute target" (r1 §9) | Conflates entitlement with funding. The token carries the `jobs` scope, and research measured **402 Payment Required** on manual runs. §16.4 |
+| 13 | Spend controls unowned (r2 §16.3) | Owned by `cdl-agent-lifecycle`, tested as DR12. D33 |
+| 14 | M0 output "committed to `notes/hardware/`" (r2 §6) | Contradicted §15, which gitignores it. Raw stays local; a redacted profile is committed. §6, §15 |
+| 15 | §15 duplicated the script's command list (r2 §15) | The two drifted immediately. §15 now states facts required; the script is authoritative for commands |

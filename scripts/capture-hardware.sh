@@ -93,12 +93,16 @@ capture "Product name" "Confirms the exact Tensorbook model; the striping design
     sudo dmidecode -s system-product-name
 capture "System version" "Distinguishes hardware revisions with different panels and drive layouts." \
     sudo dmidecode -s system-version
-capture "BIOS version and date" "Razer BIOS updates are typically Windows-only; LVFS coverage is poor. Record it before the Windows install is destroyed." \
+capture "BIOS version" "Razer BIOS updates are typically Windows-only; LVFS coverage is poor. Record it before the Windows install is destroyed." \
     sudo dmidecode -s bios-version
+capture "BIOS release date" "Dates the firmware, which is how you tell whether a documented chassis quirk has already been fixed upstream." \
+    sudo dmidecode -s bios-release-date
 capture "Secure Boot state" "Decides whether signed kernel modules are required and whether MOK enrollment joins the interactive install steps." \
     mokutil --sb-state
-capture "TPM presence" "Gates every TPM option. D7 rejected TPM auto-unlock, so this may be moot — but record it while it is knowable." \
+capture "TPM device nodes" "Gates every TPM option. D7 rejected TPM auto-unlock, so this may be moot — but record it while it is knowable." \
     ls -l /dev/tpm0 /dev/tpmrm0
+capture "TPM enrollment capability" "A device node is not the same question as whether systemd can actually enroll against it." \
+    sudo systemd-cryptenroll --tpm2-device=list
 
 section "Storage"
 capture "NVMe device list" "The striping design assumes BOTH drives are NVMe. At least one documented Tensorbook shipped 1 TB NVMe + 1 TB M.2 SATA, which would make striping actively harmful." \
@@ -135,6 +139,8 @@ capture "Supported sleep states" "The bracketed entry is active. Distinguishes s
     cat /sys/power/mem_sleep
 capture "Supported power states" "Confirms whether 'disk' (hibernate) is offered at all. D29 makes hibernation a launch requirement." \
     cat /sys/power/state
+capture "Battery design capacity" "Dependency-free sysfs read, so it survives upower being absent." \
+    sh -c 'cat /sys/class/power_supply/BAT*/energy_full_design /sys/class/power_supply/BAT*/charge_full_design 2>/dev/null'
 capture "Battery state" "Critical-battery behaviour matters: UPower's default chain ends in PowerOff with no hibernation swap, which on an FDE machine means total session loss." \
     upower --dump
 
