@@ -134,6 +134,16 @@ capture "DRM connectors" "Panel and connector topology; decides whether the cons
     ls -l /sys/class/drm/
 capture "Display providers" "Confirms the hybrid-graphics arrangement. Absent under a pure console, which is itself informative." \
     xrandr --listproviders
+# shellcheck disable=SC2016  # deliberate: the inner sh -c does the expanding, not us
+capture "Connector status" "Which outputs are physically connected right now. Run this once undocked and once docked: the diff shows exactly which connector a dock drives, and therefore which GPU has to be alive for an external monitor to work." \
+    sh -c 'for f in /sys/class/drm/card*-*/status; do printf "%s: %s\n" "${f%/status}" "$(cat "$f")"; done'
+# shellcheck disable=SC2016  # deliberate: the inner sh -c does the expanding, not us
+capture "Connector modes" "Available resolutions and refresh rates per connected output; sizes the external-monitor case." \
+    sh -c 'for f in /sys/class/drm/card*-*/modes; do [ -s "$f" ] && printf "%s: %s\n" "${f%/modes}" "$(head -3 "$f" | tr "\n" " ")"; done'
+capture "Thunderbolt / USB4 devices" "A dock usually arrives over Thunderbolt or USB4. Its authorization state decides whether the dock works at all after a reboot." \
+    sh -c 'ls -l /sys/bus/thunderbolt/devices/ 2>/dev/null || echo "no thunderbolt bus"'
+capture "Thunderbolt device detail" "Names the attached dock and its security level." \
+    boltctl list
 
 section "Memory"
 capture "Memory totals" "Swap must be >= RAM for hibernation (D25/D29). The current 72 GiB figure assumes 64 GB from a vendor launch post, NOT from measurement. This command settles the entire LVM layout." \

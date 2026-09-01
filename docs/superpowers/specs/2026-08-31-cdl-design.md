@@ -32,6 +32,11 @@ installable Linux distribution.
 > committed-versus-gitignored contradiction (§6); added M3's restore boundary (§6); and tightened
 > eight acceptance tests that did not fully test their requirements (§10).
 >
+> **Revision 2.3** (amended under the freeze rule, on M0 evidence and one new requirement): recorded
+> R18/D35/P8 — docking station and external monitor, which independently reinforce D34; noted that
+> M0 retired the striping risk, confirmed 64 GB RAM, and found hibernation unavailable, which is a
+> live §3.2 question. See `notes/hardware/tensorbook-profile.md`.
+>
 > **Revision 2.2 changes** (final consistency patch): made compositor language consistent with D34
 > and rewrote §12 around required session *properties* rather than a chosen implementation, with cage
 > as the documented rejected baseline; made the hardware-capture ignore rule fail-closed so the
@@ -223,7 +228,8 @@ review on 2026-08-31. All were confirmed by the user.
 | **D31** | **Acceptance is a fresh install onto a fully wiped machine.** Nothing hand-configured on the working machine counts as done until it exists as a package or declarative artifact in the repo. |
 | **D32** | **Three release tiers** — usable alpha (M1–M2), release candidate (M3–M4), product v1. A capability blocks only the milestone its tier assigns it (§2.2). |
 | **D33** | **Spend controls are owned by `cdl-agent-lifecycle`**, best-effort but not unowned. Minimum: per-job declared budget, per-provider concurrency ceiling, global daily warning and hard-stop where the API permits, runtime and token accounting, cost visible in `cdl status`, and defined behaviour when a provider exposes no reliable cost data. |
-| **D34** | **A compositor with a real session-lock protocol is the default answer to T2.** Minimal sway (no panel, launcher, decorations or desktop services) is preferred over cage unless spike 1 finds a cheaper path that actually passes. A proven security protocol outranks "technically not a window manager". |
+| **D34** | **A compositor with a real session-lock protocol is the default answer to T2.** Minimal sway (no panel, launcher, decorations or desktop services) is preferred over cage unless spike 1 finds a cheaper path that actually passes. A proven security protocol outranks "technically not a window manager". **Independently reinforced by R18/P8:** sway handles multi-output and hotplug natively; a single-output kiosk does not. |
+| **D35** | **Docking station and external monitor are supported (R18).** The session must survive dock and undock without restarting. A stated operator requirement, not an inference. |
 
 ### 3.1 Rejected alternatives and why
 
@@ -653,6 +659,7 @@ it, and the test that proves it. Rows marked ⚠ are those revision 1 dropped or
 | R15 ⚠ | VPN support | first-boot-and-environment §vpn | M2 | GlobalProtect connects headlessly and survives a multi-hour unattended run, **or** an off-VPN bastion path is documented instead |
 | R16 | Easy installable-USB creation | install-and-packaging §distribution | M4 | **A physical machine boots the ISO from a Ventoy stick, with Secure Boot in the same state intended for the Tensorbook** — a boot test under a different posture proves nothing about the real one. Compatibility assumed until demonstrated. Plus `dd` and Rufus paths documented and tested |
 | R17 | Fira Code with ligatures | overview §12 | M1 | Ligatures render in kitty; icon glyphs come from the fallback, not a patched font |
+| R18 | **Docking station + external monitor** (D35) | overview §12 P8; first-boot-and-environment §display | M2 | Dock and undock with a session running and agents attached: outputs appear and disappear, the session survives, no restart needed, and the terminal is usable on the external display. Output layout is remembered across dock cycles |
 | DR1 | Several agents concurrently (D8/D28) | agent-lifecycle | M2 | The full D28 working shape runs overnight unattended |
 | DR2 | Long-lived unattended sessions (D9) | agent-lifecycle §supervision | M2 | Agent survives logout, **termination and restart of kitty/zellij** (not a machine reboot — D26 means a reboot needs the passphrase), and network loss |
 | DR3 | Remote job launching (D10/D30) | agent-lifecycle §jobs | M2 | All seven verbs against the GPU host; reconcile recovers a job whose launcher died |
@@ -724,6 +731,7 @@ do; §9 says how the candidate is chosen.
 | P5 | Literal Super/Cmd keybindings delivered to applications | R4, and the reason zellij replaces tmux (§8) |
 | P6 | A rescue path independent of the compositor | A broken GPU driver must never leave the machine unreachable — a getty on tty2 |
 | P7 | Defined behaviour when the locker or compositor crashes | An unattended machine must fail closed, not into a live shell |
+| P8 | **Multiple outputs, with hotplug** — dock and undock while the session runs, without restarting it | **New requirement (R18), stated during M0.** The operator uses a docking station and an external monitor. A session that must be restarted to gain or lose a display is not usable on a laptop that docks |
 
 ### 12.2 Session path
 
@@ -741,6 +749,11 @@ Revision 1 selected cage and proposed swaylock under it. **Cage implements neith
 `ext-session-lock-v1` nor layer-shell** — verified against the source tree (no `session_lock.c`; no
 matches for `session_lock`/`layer_shell` in the 716-line `cage.c`) and confirmed by open upstream
 issue **#264, "Add support for ext-session-lock-v1."** It therefore fails P4, which is disqualifying.
+
+**It very likely fails P8 as well.** Cage is a single-output kiosk, and research flagged early that
+"whether cage (a single-output kiosk) handles hotplug at all is unknown and unresearched." The
+docking requirement arrived after cage had already been ruled out on P4, so two independent
+disqualifications stand — not worth a spike to confirm.
 
 `physlock` is not an equivalent substitute: it draws its prompt on the VT, which the compositor
 occupies as DRM master, so the prompt would not be visible. *That step is reasoning from the display

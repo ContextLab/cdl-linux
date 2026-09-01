@@ -78,6 +78,13 @@ command; see below.
 | Internal panel | **`eDP-1` on card1 = the Intel iGPU** (`0000:00:02.0`) |
 | NVIDIA outputs | card0 (`0000:01:00.0`) carries `HDMI-A-1` and `DP-5`…`DP-8` |
 
+> **Caveat added with R18 (docking).** The milder failure mode below holds for the *internal* panel.
+> The external outputs — `HDMI-A-1` and `DP-5`…`DP-8` — are on the **NVIDIA** GPU, while `DP-1`…`DP-4`
+> are on the Intel side. So whether a docked external monitor depends on the NVIDIA driver comes down
+> to which connector the dock actually drives, and that is unknown until the machine is captured while
+> docked. `scripts/capture-followup.sh` prints the connector table for exactly that comparison —
+> run it once undocked and once docked, and diff.
+
 **The console comes from `i915`, not `nvidia-drm`.** The machine is in hybrid/Dynamic Display Switch
 mode, not "Dedicated GPU Only". This is materially good news: the internal panel is driven by the
 Intel iGPU, so a broken NVIDIA driver does not by itself black out the display. The tty2 rescue getty
