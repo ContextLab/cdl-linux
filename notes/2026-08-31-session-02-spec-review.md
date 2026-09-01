@@ -79,11 +79,25 @@ Corrections worth remembering because they were inherited errors, not typos:
 
 ## Resume here
 
-1. Wait for the user's review of revision 2 before writing component specs — the four briefs in §7
-   are the commissioning input and may change.
-2. Run `scripts/capture-hardware.sh` on the Tensorbook (needs sudo; output is gitignored).
-3. §7.1 lists content that left revision 1 with **no written destination yet** — provider env-var
+1. **Run `scripts/capture-hardware.sh` on the Tensorbook** with sudo (M0). One-way and blocking for
+   five design decisions. Produces: ignored raw capture, an off-machine copy, and a committed
+   redacted `notes/hardware/tensorbook-profile.md`, plus explicit go/no-go on VMD, dual-NVMe
+   striping, GPU/display topology, sleep support, swap size, Secure Boot posture, thermal baseline.
+2. **Write `cdl-agent-lifecycle`** — first component spec, drives M1. First executable slice is one
+   local interactive agent; do not deep-specify cloud, HF, Slurm or GPU scheduling, which are
+   extension points around a proven local lifecycle.
+3. **Write only the M1 slice** of `cdl-first-boot-and-environment` (session closure, sway/kitty/
+   swaylock/zellij/fonts/croft, keybinding generation, Emacs + LLM integration, provider enrollment
+   and bounded `cdl doctor`, offline startup, non-JS browser). Defer CUDA, VPN, thermal policy,
+   model GC and LaTeX sizing until M0 returns facts.
+4. **Run spikes 1 and 2.** Spike 1: tty login → sway → kitty → zellij → swaylock, testing normal
+   lock, idle lock, lid, locker crash, compositor crash, tty2 recovery. Spike 2: launch → attach →
+   detach → logout → login → reattach → kill kitty/zellij → reattach → exit, with preserved status
+   and no prompt replay.
+5. **Do not yet specify** ISO construction, subiquity storage integration, apt repo hosting,
+   snapshot rollback, cloud/HF adapters, or hibernation implementation. Skeletal files are fine.
+6. §7.1 lists content that left revision 1 with **no written destination yet** — provider env-var
    spellings, llama-swap rationale, clustrix verdict, restic `--exclude-caches`/`CACHEDIR.TAG`,
    GRUB recovery menu. Source is in `notes/research/`. Each receiving spec must reconcile against it.
-4. §16.3 spend controls is still **unowned** (DR12 in the traceability matrix, no component). Needs a
-   product decision: v1 feature, documented gap, or explicit non-goal.
+7. **Open, blocked on the user:** name the one cloud provider (§16.4); decide whether to fund HF Jobs
+   (settled by one paid job submission); NAS make and model for the capability probe (§16.3).
