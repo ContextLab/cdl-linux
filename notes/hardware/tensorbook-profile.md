@@ -1,10 +1,13 @@
 # Tensorbook hardware profile
 
 **Source:** `scripts/capture-hardware.sh`, run as root on 2026-09-01T02:19:32Z.
-**Status: M0 is PARTIALLY complete.** See "Capture gaps" and "Firmware settings" below — SMART
-health, lockdown state, the fan-control inventory and every firmware answer are still outstanding,
-and M0 must not be called complete until they are recorded. Re-run with
-`sudo scripts/capture-followup.sh --skip-dock-test`, which needs no docking station.
+**Follow-up:** `scripts/capture-followup.sh`, run 2026-09-01T12:49Z (kernel 7.0.0-30-generic —
+note the machine has taken a kernel update since the first capture). Published as
+`notes/hardware/tensorbook-20260901T124921Z-diagnosis.md`.
+
+**Status: M0 is complete except the firmware gate.** Every command-capturable item is now
+recorded. Outstanding: the four firmware observations, which need a reboot into setup, and the
+dock connector question, deliberately deferred to M2 (§16.6).
 **Raw capture:** `notes/hardware/tensorbook-<date>-raw.md` — gitignored, retained off-machine.
 
 Redacted: serial numbers, MAC addresses, filesystem UUIDs and hostname are deliberately absent.
@@ -76,15 +79,86 @@ See "Decisions this capture forces" below.
 | `resume=` on cmdline | Absent |
 | Current swap | 7 GB — far below RAM in any case |
 
-**This directly blocks D29, and the indicated cause is Secure Boot.** The kernel exposes `disk` only
-when `hibernation_available()` is true, which requires both that `nohibernate` is unset — it is unset
-here — and that `LOCKDOWN_HIBERNATION` is not blocked. Ubuntu puts the kernel in lockdown *integrity*
-mode when Secure Boot is enabled, and that mode blocks hibernation because the resume image cannot be
-verified.
+**This directly blocks D29, and the cause is now CONFIRMED rather than inferred.** The follow-up
+read the lockdown state directly:
 
-*This is inference from the kernel's documented behaviour plus two measured facts (Secure Boot
-enabled, no `nohibernate`), not a direct observation of the lockdown state.* The decisive test is one
-command; see below.
+```
+lockdown        : none [integrity] confidentiality
+```
+
+The bracketed `[integrity]` is the active mode. Kernel lockdown is on, which is what hides `disk`
+from `/sys/power/state`; `nohibernate` is unset, ruling out the other cause. Secure Boot →
+lockdown → hibernation blocked.
+
+*Revision 2.3 recorded this as inference from documented kernel behaviour. It is now a direct
+observation.* On a stock Ubuntu kernel, Secure Boot and hibernation are mutually exclusive here.
+
+## Drive health — ✅ GO, with two anomalies worth noting
+
+Measured 2026-09-01. Both drives pass every threshold the follow-up checks.
+
+| | `/dev/nvme0n1` | `/dev/nvme1n1` |
+|-|-|-|
+| SMART health | **PASSED** | **PASSED** |
+| Critical warning | `0x00` | `0x00` |
+| Endurance used | **2 %** | **0 %** |
+| Available spare | 100 % | 100 % |
+| Media/data-integrity errors | **0** | **0** |
+| Power-on hours | 255 | 206 |
+| Unsafe shutdowns | **65** | **66** |
+| Data written | **48.0 TB** | 5.5 TB |
+
+**The drive-health go/no-go passes.** Zero media errors, full spare, minimal endurance consumed.
+Nothing here argues against striping this pair.
+
+**Anomaly 1 — unsafe shutdowns.** 65 and 66 unclean shutdowns against 255 and 206 power-on hours is
+roughly **one unclean shutdown every 3–4 hours of uptime**. That is a stability signal, and it
+interacts with two design decisions: RAID0 has no redundancy to absorb a torn write, and btrfs is
+being asked to survive them. It may be benign — a machine habitually powered off by holding the
+button, or counters carried over from a prior life — but it should be explained before M3 commits to
+the striped layout, not after. *Derived from the captured counters, not itself a measurement of
+cause.*
+
+**Anomaly 2 — write volume.** `nvme0n1` shows 48.0 TB written in 255 power-on hours: ~52 MB/s
+sustained across the drive's entire recorded life, and ~47 full drive-writes on a ~1 TB device. The
+*system* drive (`nvme1n1`) shows only 5.5 TB. The heavily-written drive is the one currently holding
+an unmounted whole-disk ext4 filesystem. Consistent with it having served as ML scratch or dataset
+staging. Endurance is still only 2 %, so this is context rather than a problem — but it means the
+two drives are not equally worn, which is worth knowing before striping them together.
+
+## Sector geometry — settled
+
+```
+LBA Format  0 : Metadata Size: 0 bytes - Data Size: 512 bytes - Relative Performance: 0 Best (in use)
+```
+
+**Exactly one LBA format exists on both drives, 512 bytes, in use.** There is no 4096-byte format to
+switch to, so these drives are 512-byte natively and cannot be reformatted to 4K. This closes the
+question the profile previously got wrong: not "512e", and not a native-4K device presenting 512.
+
+Consequence for the install spec: `--sector-size 4096` on the LUKS container remains available as a
+**dm-crypt-layer** choice over 512-byte devices, and the throughput claim behind it is still
+subagent-reported and unmeasured on this hardware.
+
+## Thermal and fan control — measured, and it confirms the risk
+
+| Fact | Value |
+|-|-|
+| hwmon chips | `AC0`, `acpi_fan`, `acpitz`, `BAT0`, `coretemp`, `iwlwifi_1`, `nvme` |
+| Fan speed inputs | **0** |
+| Writable PWM controls | **0** |
+| Cooling devices | **29** |
+| Idle temps | `x86_pkg_temp` 52 °C, `TCPU` 49 °C, `acpitz` 27.8 °C, `iwlwifi` 32 °C |
+| CPU scaling driver | `intel_pstate` |
+
+**The reported "no fan control at all" on this chassis is now confirmed on this unit rather than
+being hearsay.** An `acpi_fan` device exists, but it exposes neither a readable speed nor a writable
+control. What the system *can* do is throttle: 29 cooling devices are present, which is
+`intel_pstate` and the thermal zones, not fans.
+
+So the sustained-load policy §16.5 assigns to `cdl-first-boot-and-environment` has to be built on
+**throttling and refusal-to-launch**, not on spinning fans faster. `SEN1`–`SEN4` report 50 m°C, which
+is 0.05 °C and clearly an unpopulated sensor rather than a reading — do not build policy on those.
 
 ## GPU and display — ✅ GO, and better than assumed
 
@@ -136,13 +210,15 @@ permanently unavailable to agents.
 
 ## Capture gaps
 
-| Gap | Consequence |
+| Gap | Status |
 |-|-|
-| `nvme-cli` not installed | No NVMe-native controller detail. Non-blocking — `lsblk` answered the drive-type question |
-| `smartmontools` not installed | **No SMART wear or error history.** This was a stated go/no-go input: under RAID0 either drive's failure loses everything, so their health matters. Install `smartmontools` and re-run before M3 |
+| `nvme-cli` not installed | ✅ **Closed** — installed; namespace format captured and the sector question settled |
+| `smartmontools` not installed | ✅ **Closed** — both drives read, both PASSED |
+| Kernel lockdown state not read | ✅ **Closed** — `[integrity]` confirmed active; D29's cause is now observation, not inference |
+| Fan, hwmon and thermal-zone inventory absent | ✅ **Closed** — no fan telemetry or control exists; 29 cooling devices; policy must rest on throttling |
 | Battery `charge_full_design` absent | Expected — this battery reports in energy units, and `energy_full_design` was captured |
-| Kernel lockdown state not read | The capture predated that check, so the cause of the missing `disk` is inference rather than observation. `capture-hardware.sh` reads it now |
-| Fan, hwmon and thermal-zone inventory absent | §16.5 assigns M0 the job of recording what fan-control interfaces this chassis exposes; the first capture predated those checks. Six read-only captures were added afterwards. **Pending the re-run** |
+| Which GPU drives a docked external monitor | ⬜ **Deferred to M2** (§16.6). The follow-up did identify the dock itself: a **USB4 dock, "T4801" (Shenzhen Lianfaxun)**, already authorized with `iommu` policy, showing `disconnected` at capture time |
+| NVIDIA connectors absent from this run | ⬜ Only `card1` (i915) connectors were enumerated this time, though the first capture saw `card0-DP-5`…`DP-8` and `HDMI-A-1`. Most likely the dGPU was runtime-suspended or unbound. **Re-check while docked** — it bears directly on §16.6 |
 
 ## Firmware settings — still outstanding
 

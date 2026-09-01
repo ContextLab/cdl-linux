@@ -466,7 +466,7 @@ fi
 
 if [[ $DOCK_TEST -eq 0 ]]; then
     echo
-    echo "Dock test skipped (--skip-dock-test)."
+    echo "Dock test not run (it is off by default; --dock-test enables it)."
     warnings+=("dock test skipped: which GPU drives the external monitor is still unknown")
 else
     echo

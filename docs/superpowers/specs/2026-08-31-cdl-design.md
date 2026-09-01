@@ -248,6 +248,11 @@ review on 2026-08-31. All were confirmed by the user.
 
 ### 3.2 D29's failure branch
 
+**Status as of 2026-09-01: this branch is live.** M0 confirmed by direct observation that kernel
+lockdown is active (`none [integrity] confidentiality`) and is what hides `disk` from
+`/sys/power/state`. Secure Boot and hibernation are mutually exclusive on a stock Ubuntu kernel here.
+The choice below is now required before M3, not hypothetical.
+
 D29 makes hibernation a launch requirement on a chassis with documented, severe suspend and
 hibernate defects. A launch requirement with no failure branch is how a project accumulates
 increasingly desperate kernel workarounds: each one is individually justified because failing is not
@@ -960,15 +965,18 @@ thermals are a first-class risk.
 **This is an open question, not an unowned one.** Revision 2.1 said unowned, which contradicted §7 —
 `cdl-first-boot-and-environment` already owns power, lid, battery and thermal policy. The work splits:
 
-- **M0** records the GPU's thermal and power limits, and the fan control interfaces the machine
-  actually exposes.
+- **M0** ✅ **done.** Measured 2026-09-01: **no fan speed inputs and no writable PWM controls
+  exist**, so the reported "no fan control at all" is confirmed on this unit rather than being
+  hearsay. An `acpi_fan` device is present but exposes neither. 29 cooling devices exist — those are
+  `intel_pstate` and the thermal zones, i.e. throttling, not fans. Idle `x86_pkg_temp` 52 °C.
 - **M2** runs a controlled sustained-load test and records the steady-state thermal behaviour.
-- **`cdl-first-boot-and-environment`** owns the resulting policy: throttling, temperature thresholds,
-  whether sustained local inference requires AC power, and **refusal to launch local jobs when
-  conditions are unsafe** — which makes it an input to GPU admission control in
-  `cdl-agent-lifecycle`.
+- **`cdl-first-boot-and-environment`** owns the resulting policy. Given the M0 result, that policy
+  **cannot rest on fan control** — it has to be throttling, temperature thresholds, whether sustained
+  local inference requires AC power, and **refusal to launch local jobs when conditions are
+  unsafe**, which makes it an input to GPU admission control in `cdl-agent-lifecycle`.
 
-What remains genuinely open is only the measurement, which M0 and M2 supply.
+What remains open is the M2 sustained-load measurement: what steady state this chassis actually
+reaches under a multi-hour local inference run, given that nothing can spin the fans faster.
 
 ### 16.6 Which GPU drives the docked external monitor
 
