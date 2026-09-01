@@ -98,6 +98,26 @@ smart_unparsed_fields() {
     return 0
 }
 
+# Reports identifiers found in a file that is about to be emailed or pushed to a PUBLIC
+# repository, one "label: line" per finding, empty output when clean. Extracted so it can
+# be tested against planted leaks: a redaction claim should be checked against the file,
+# not trusted to the code that wrote it, because a leak reaching public git history cannot
+# be recalled.
+diagnosis_leaks() {
+    local file="$1" label pattern hits
+    while IFS='|' read -r label pattern; do
+        [[ -z "$label" ]] && continue
+        hits="$(grep -nEi "$pattern" "$file" 2>/dev/null | head -5)"
+        [[ -n "$hits" ]] && printf '%s: %s\n' "$label" "$(head -1 <<<"$hits")"
+    done <<'PATTERNS'
+MAC address|([0-9a-f]{2}:){5}[0-9a-f]{2}
+UUID|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}
+labelled serial|(serial|sn)[[:space:]]*[:=][[:space:]]*[a-z0-9]{6,}
+private IPv4|(^|[^0-9.])(10|172|192|100)\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}
+PATTERNS
+    return 0
+}
+
 snapshot_thunderbolt() {
     find /sys/bus/thunderbolt/devices/ -mindepth 1 -maxdepth 1 -printf '%f\n' 2>/dev/null | sort
 }
@@ -331,8 +351,16 @@ snapshot_connectors | while IFS=$'\t' read -r conn st drv; do
 done
 
 if command -v boltctl >/dev/null 2>&1; then
-    echo "thunderbolt:"; boltctl list 2>/dev/null | sed 's/^/  /' | head -20
+    # `boltctl list` prints per-device uuid, serial and key material. Those identify this
+    # specific unit and its specific dock, and this file is meant to be sendable, so they
+    # are stripped here. The model, vendor, type and authorization status all survive,
+    # which is everything the design actually needs.
+    echo "thunderbolt (uuid/serial/key stripped — see the raw capture for full detail):"
+    boltctl list 2>/dev/null \
+        | grep -viE '(uuid|serial|[[:space:]]key)[[:space:]]*:' \
+        | sed 's/^/  /' | head -20
 elif [[ -d /sys/bus/thunderbolt/devices ]]; then
+    # sysfs device names here are bus positions like "0-1", not identifiers.
     echo "thunderbolt devices: $(snapshot_thunderbolt | tr '\n' ' ')"
 else
     echo "thunderbolt: no bus present"
@@ -470,6 +498,21 @@ printf 'cpufreq driver   : %s\n' "$(cat /sys/devices/system/cpu/cpu0/cpufreq/sca
 
 } > "$diag_file"
 cat "$diag_file"
+
+# ---------------------------------------------------------------------------
+# Redaction self-check. The diagnosis is advertised as safe to email or push to a PUBLIC
+# repository, and that claim should be verified against the generated file rather than
+# trusted to the code that wrote it. Anything found here is blocking: a leak that reaches
+# a public git history cannot be recalled.
+# ---------------------------------------------------------------------------
+leaks="$(diagnosis_leaks "$diag_file")"
+if [[ -n "$leaks" ]]; then
+    printf '\n\033[1;31mREDACTION CHECK FAILED — do NOT email or push this file yet:\033[0m\n'
+    printf '%s\n' "$leaks" | sed 's/^/  /'
+    blocking+=("diagnosis file contains identifiers — see the redaction check above")
+else
+    printf '\nRedaction check: clean (no MACs, UUIDs, labelled serials or private IPs).\n'
+fi
 
 # ---------------------------------------------------------------------------
 say "SUMMARY"

@@ -144,15 +144,61 @@ else
     pass "the diagnosis group is not piped to tee"
 fi
 
-# Every blocking+= call must sit inside that group, or it cannot influence --strict.
+# The property that matters is not "every blocking+= is inside the group" — the redaction
+# check legitimately runs after the group closes, and its append works normally there.
+# What matters is that SOME blocking+= calls are inside, because that is what makes the
+# redirect-versus-pipe distinction load-bearing rather than academic.
 open_ln=$(grep -n '^{$' "$repo_root/scripts/capture-followup.sh" | cut -d: -f1)
 # shellcheck disable=SC2016  # a literal grep pattern; expansion would break it
 close_ln=$(grep -n '^} > "\$diag_file"$' "$repo_root/scripts/capture-followup.sh" | cut -d: -f1)
-outside=0
+inside=0
 while IFS=: read -r ln _; do
-    if [[ "$ln" -lt "$open_ln" || "$ln" -gt "$close_ln" ]]; then outside=$((outside + 1)); fi
+    if [[ "$ln" -gt "$open_ln" && "$ln" -lt "$close_ln" ]]; then inside=$((inside + 1)); fi
 done < <(grep -n 'blocking+=' "$repo_root/scripts/capture-followup.sh")
-check "every blocking+= call sits inside the diagnosis group" "0" "$outside"
+if [[ "$inside" -ge 1 ]]; then
+    pass "the group contains blocking+= calls ($inside), so the redirect is load-bearing"
+else
+    fail "no blocking+= inside the group — the redirect/pipe distinction no longer matters"
+fi
+
+# ---------------------------------------------------------------------------
+echo
+echo "== redaction scanner =="
+# ---------------------------------------------------------------------------
+# The diagnosis file is advertised as safe to email or push to a PUBLIC repository. That
+# claim is checked against the generated file at runtime; these cases check the checker.
+leakfile="$tmp/leaky.md"
+cat > "$leakfile" <<'LEAKY'
+uuid:          00b5cf1e-9f2a-4c3d-a1b2-0123456789ab
+link/ether     aa:bb:cc:dd:ee:ff
+serial:        S64ANE0R123456
+inet 192.168.1.44
+LEAKY
+# LC_ALL=C so the comparison does not depend on the runner's collation: en_US sorts
+# case-insensitively and would order these differently from the C locale.
+found="$(diagnosis_leaks "$leakfile" | cut -d: -f1 | LC_ALL=C sort | paste -sd'|' -)"
+check "planted MAC, UUID, serial and private IP are all caught" \
+    "MAC address|UUID|labelled serial|private IPv4" \
+    "$found"
+
+cleanfile="$tmp/clean.md"
+cat > "$cleanfile" <<'CLEAN'
+secure boot     : SecureBoot enabled
+lockdown        : none [integrity] confidential
+power states    : freeze mem
+/dev/nvme0n1
+  health=PASSED  critical_warning=0x00
+  pct_used=3%  spare=100%  media_errors=0
+hwmon chips      : coretemp nvme
+zone temps (m°C) : x86_pkg_temp:47000 acpitz:44000
+CLEAN
+check "a realistic clean diagnosis produces no findings" "" "$(diagnosis_leaks "$cleanfile")"
+
+# Drive and chassis MODEL numbers must not be mistaken for serials — they are exactly the
+# facts the profile is supposed to publish.
+modelfile="$tmp/models.md"
+printf 'SAMSUNG MZVL21T0HCLR-00B00\nNVIDIA GeForce RTX 3080 Laptop GPU\nTensorBook (late 2021)\n' > "$modelfile"
+check "model numbers are not flagged as identifiers" "" "$(diagnosis_leaks "$modelfile")"
 
 echo
 if [[ $failures -eq 0 ]]; then
