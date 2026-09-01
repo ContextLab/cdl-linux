@@ -34,8 +34,9 @@ installable Linux distribution.
 >
 > **Revision 2.3** (amended under the freeze rule, on M0 evidence and one new requirement): recorded
 > R18/D35/P8 — docking station and external monitor, which independently reinforce D34; noted that
-> M0 retired the striping risk, confirmed 64 GB RAM, and found hibernation unavailable, which is a
-> live §3.2 question. See `notes/hardware/tensorbook-profile.md`.
+> M0 retired the **mixed-media striping concern only** — both drives are NVMe and identical, while
+> every other RAID0 risk stands, including drive health, which is still unmeasured — confirmed 64 GB
+> RAM, and found hibernation unavailable, which is a live §3.2 question. See `notes/hardware/tensorbook-profile.md`.
 >
 > **Revision 2.2 changes** (final consistency patch): made compositor language consistent with D34
 > and rewrote §12 around required session *properties* rather than a chosen implementation, with cage
@@ -259,9 +260,9 @@ one of these branches — explicitly, as a recorded decision, not by drift:
    feature that works intermittently.
 2. **Change the target hardware.** The design is meant to be hardware-profile-driven (D1); a machine
    that cannot hibernate reliably may simply be the wrong first target.
-3. **Reconsider D29.** The user downgrades hibernation to an experiment, R8's orderly-shutdown
-   behaviour (R8b) becomes the shipped behaviour, and the swap sizing stays as-is so the decision
-   can be revisited without a reinstall.
+3. **Reconsider D29.** The user downgrades hibernation to an experiment, **R8's orderly-shutdown
+   behaviour becomes the shipped behaviour and R8b is dropped**, and the swap sizing stays as-is so
+   the decision can be revisited without a reinstall.
 
 **Branch 3 is the only one that does not require restarting work**, which is why R8 is written so
 that its M2 behaviour is independently shippable. What is *not* permitted is a fourth branch where

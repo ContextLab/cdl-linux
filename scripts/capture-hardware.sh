@@ -8,8 +8,12 @@
 # Read-only: this script never writes outside its output file and never modifies the system.
 #
 # Usage:
-#   ./scripts/capture-hardware.sh                    # writes notes/hardware/<host>-<date>.md
-#   ./scripts/capture-hardware.sh /path/to/out.md    # writes where you say
+#   ./scripts/capture-hardware.sh                 # writes notes/hardware/<host>-<UTC timestamp>-raw.md
+#   ./scripts/capture-hardware.sh /path/to/out.md # writes where you say
+#
+# The default path is timestamped to the second and will NOT be overwritten -- a capture is
+# one-way evidence, so the script refuses rather than clobbering. An explicit output path is
+# yours to manage and IS overwritten without asking.
 #
 # Run it with sudo for the full picture; without sudo it still runs and marks the privileged
 # items as NOT CAPTURED rather than silently omitting them.
@@ -25,9 +29,19 @@ OUT="${1:-}"
 if [[ -z "$OUT" ]]; then
     repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
     mkdir -p "$repo_root/notes/hardware"
-    # The "-raw" suffix is load-bearing: it matches the ignore pattern in
-    # .gitignore, so a raw capture cannot be committed by accident.
-    OUT="$repo_root/notes/hardware/$(hostname -s 2>/dev/null || echo unknown)-$(date +%Y-%m-%d)-raw.md"
+    # A capture is ONE-WAY evidence: after the machine is reinstalled it cannot be
+    # recreated. An earlier version named the file by date alone, so a second run on the
+    # same day silently destroyed the first capture. Two defences, deliberately redundant:
+    #   1. a UTC timestamp to the second, so collision needs two runs in the same second;
+    #   2. a flat refusal to clobber, so even that collision cannot destroy evidence.
+    # The "-raw" suffix is load-bearing: it marks the file as raw capture output, and
+    # .gitignore keeps everything in this directory out of git by default.
+    OUT="$repo_root/notes/hardware/$(hostname -s 2>/dev/null || echo unknown)-$(date -u +%Y%m%dT%H%M%SZ)-raw.md"
+    if [[ -e "$OUT" ]]; then
+        echo "Refusing to overwrite an existing capture: $OUT" >&2
+        echo "Captures are one-way evidence. Move it aside or pass an explicit output path." >&2
+        exit 1
+    fi
 fi
 
 missing=()
@@ -177,9 +191,12 @@ capture "Hardware monitoring chips" "Names the hwmon devices present. No hwmon e
 capture "Fan and PWM interfaces" "Whether fan speeds are even readable, and whether any writable pwm control exists. Absence here confirms the reported no-fan-control situation rather than leaving it hearsay." \
     sh -c 'found=0; for f in /sys/class/hwmon/hwmon*/fan*_input /sys/class/hwmon/hwmon*/pwm[0-9]*; do [ -e "$f" ] || continue; found=1; printf "%s (mode %s): %s\n" "$f" "$(stat -c %a "$f" 2>/dev/null)" "$(cat "$f" 2>/dev/null || echo unreadable)"; done; [ "$found" = 0 ] && echo "no fan_input or pwm interfaces exposed"'
 # shellcheck disable=SC2016  # deliberate: the inner sh -c does the expanding, not us
-capture "Thermal zones" "Current temperatures and trip points. Sets the thermal baseline that M2 sustained-load testing is compared against." \
-    sh -c 'for f in /sys/class/thermal/thermal_zone*/type; do d="${f%/type}"; printf "%s: %s = %s\n" "$d" "$(cat "$f" 2>/dev/null)" "$(cat "$d/temp" 2>/dev/null)"; done'
-capture "Razer HID devices" "Razer chassis control tools bind to vendor 1532 USB/HID devices. Whether one is present decides if any third-party fan utility could work at all." \
+capture "Thermal zones and trip points" "Current temperatures plus the trip points that decide when throttling starts. The trip points are what a sustained-load policy is written against, so record them while the machine is stock." \
+    sh -c 'for f in /sys/class/thermal/thermal_zone*/type; do d="${f%/type}"; printf "%s: %s = %s\n" "$d" "$(cat "$f" 2>/dev/null)" "$(cat "$d/temp" 2>/dev/null)"; for tp in "$d"/trip_point_*_type; do [ -e "$tp" ] || continue; printf "    %s: %s @ %s\n" "${tp##*/}" "$(cat "$tp" 2>/dev/null)" "$(cat "${tp%_type}_temp" 2>/dev/null)"; done; done'
+# shellcheck disable=SC2016  # deliberate: the inner sh -c does the expanding, not us
+capture "Cooling devices" "What the kernel can actually actuate for cooling, and its current versus maximum state. An empty list is the strongest evidence that fan control is unavailable." \
+    sh -c 'found=0; for d in /sys/class/thermal/cooling_device*; do [ -e "$d/type" ] || continue; found=1; printf "%s: %s cur=%s max=%s\n" "${d##*/}" "$(cat "$d/type" 2>/dev/null)" "$(cat "$d/cur_state" 2>/dev/null)" "$(cat "$d/max_state" 2>/dev/null)"; done; [ "$found" = 0 ] && echo "no cooling devices exposed"'
+capture "Razer HID devices" "Razer chassis control tools bind to vendor 1532 USB/HID devices. Presence is a NECESSARY condition, not proof of support: it determines whether further compatibility probing is possible. Actual model recognition and supported commands still need a read-only probe from whichever utility is chosen." \
     sh -c 'lsusb 2>/dev/null | grep -i "1532\|razer" || echo "no Razer (1532) USB device found"'
 capture "CPU thermal and frequency driver" "Which driver governs CPU throttling, which is the other half of the sustained-load question." \
     sh -c 'cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_driver 2>/dev/null || echo "no cpufreq scaling_driver"'

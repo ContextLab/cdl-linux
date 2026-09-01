@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# capture-followup.sh — closes the two M0 capture gaps and diagnoses the D29 blocker.
+# capture-followup.sh — closes the remaining command-capturable M0 gaps and diagnoses the
+# D29 blocker. Firmware observations are a separate manual gate and are NOT covered here.
 #
 # The 2026-09-01 capture left three things open:
 #   1. smartmontools and nvme-cli were not installed, so there is NO SMART wear or error
@@ -34,6 +35,11 @@
 #     --skip-dock-test   skip the interactive dock steps
 #     --strict           exit non-zero if essential M0 evidence is still missing,
 #                        instead of only printing warnings. For scripted or CI use.
+#                        NOTE: --strict covers MACHINE-READABLE capture evidence only.
+#                        The firmware observations (VMD/RST vs AHCI, graphics mode,
+#                        whether Secure Boot can be disabled, BIOS password) need a
+#                        reboot into setup and remain a separate manual M0 gate that no
+#                        exit code can speak to.
 
 set -uo pipefail
 
@@ -69,6 +75,20 @@ snapshot_connectors() {
         drv="$(basename "$(readlink -f "/sys/class/drm/$card/device/driver" 2>/dev/null)" 2>/dev/null)"
         printf '%s\t%s\t%s\n' "$conn" "$(cat "$f" 2>/dev/null || echo '?')" "${drv:-?}"
     done | sort
+}
+
+# Names the SMART fields that are missing or unparseable, one per line, empty if all are
+# usable. Extracted so it can be tested: smartctl succeeding is not the same as smartctl
+# producing usable output, and that difference is exactly what --strict must catch.
+# Args: health critical_warning percentage_used available_spare media_errors
+smart_unparsed_fields() {
+    local health="$1" crit="$2" pct="$3" spare="$4" media="$5"
+    [[ -z "$health" ]] && echo "overall health"
+    [[ -z "$crit"   ]] && echo "critical warning"
+    [[ "$pct"   =~ ^[0-9]+$ ]] || echo "percentage used"
+    [[ "$spare" =~ ^[0-9]+$ ]] || echo "available spare"
+    [[ "$media" =~ ^[0-9]+$ ]] || echo "media/data-integrity errors"
+    return 0
 }
 
 snapshot_thunderbolt() {
@@ -218,7 +238,9 @@ else
     mapfile -t drives < <(lsblk -d -n -o NAME,TRAN 2>/dev/null | awk '$2=="nvme"{print "/dev/"$1}')
     if [[ ${#drives[@]} -eq 0 ]]; then
         echo "No NVMe block devices found."
-        warnings+=("no NVMe devices detected")
+        # Blocking, not advisory: this machine is known to have two NVMe drives, so finding
+        # none means the capture is wrong, not that the hardware changed.
+        blocking+=("no NVMe devices detected — SMART evidence cannot be collected")
     fi
     for d in "${drives[@]}"; do
         a="$(smartctl -a "$d" 2>/dev/null)"
@@ -238,6 +260,15 @@ else
         printf '  pct_used=%s%%  spare=%s%%  media_errors=%s\n' "${pct:-?}" "${spare:-?}" "${media:-?}"
         printf '  power_on_hours=%s  unsafe_shutdowns=%s\n' "${hours:-?}" "${unsafe:-?}"
         printf '  written=%s\n' "${written:-?}"
+
+        # smartctl existing is not the same as smartctl producing usable output: a wrong
+        # device type, a USB bridge, or a permissions problem yields empty fields while the
+        # command still succeeds. Strict mode must fail on that, not report a clean bill.
+        mapfile -t unparsed < <(smart_unparsed_fields "$health" "$crit" "$pct" "$spare" "$media")
+        if [[ ${#unparsed[@]} -gt 0 ]]; then
+            printf '  UNPARSEABLE: %s\n' "$(IFS=', '; echo "${unparsed[*]}")"
+            blocking+=("$d: SMART output missing or unparseable for: $(IFS=', '; echo "${unparsed[*]}")")
+        fi
 
         # Threshold checks. Only numeric comparisons when we actually parsed a number.
         [[ "$health" =~ ^PASSED|^OK ]] || warnings+=("$d: SMART health is '${health:-unknown}', not PASSED")
@@ -382,7 +413,8 @@ fi
 
 if [[ ${#blocking[@]} -eq 0 ]]; then
     echo
-    echo "Still needed to close M0 — reboot into firmware setup and record by hand:"
+    echo "Machine-readable M0 evidence is complete. Still needed to close M0 — a separate"
+    echo "manual gate, requiring a reboot into firmware setup, that --strict cannot check:"
     echo "  - Intel VMD/RST vs AHCI          - graphics mode"
     echo "  - can Secure Boot be disabled?   - BIOS password set?"
 fi
