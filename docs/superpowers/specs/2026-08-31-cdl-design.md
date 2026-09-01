@@ -1,6 +1,6 @@
 # CDL Linux — Product and Architecture Overview
 
-**Status:** **Frozen for implementation** · **Revision:** 2.2 · **Date:** 2026-08-31 · **Repo:** `ContextLab/cdl-linux`
+**Status:** **Frozen for implementation** · **Revision:** 2.3 · **Date:** 2026-08-31 · **Repo:** `ContextLab/cdl-linux`
 
 A focused coordination appliance for supervising concurrent LLM agent work, delivered as an
 installable Linux distribution.
@@ -284,7 +284,7 @@ Requirements that **cannot be satisfied as originally stated**. Each is stated w
 | ~2 TB with any redundancy | Arithmetic: two 1 TB drives give 2 TB with none, or 1 TB mirrored. | Accepted deliberately (D15). Off-machine backup is therefore mandatory, not optional. |
 | Fully unattended install | Wifi credentials, LUKS passphrase, API keys and remote-host key enrollment are all irreducibly interactive. | The install is interactive by design. This spec does not claim otherwise. |
 | OAuth/SAML login from a text browser | Terminal browsers have no JavaScript engine; modern IdP consent screens are JS SPAs. | Never authenticate on the machine. Pre-generate tokens elsewhere; complete browser flows on another device. |
-| **Lock the screen under cage with swaylock** | Cage implements neither `ext-session-lock-v1` nor layer-shell. **Verified:** no `session_lock.c` in the source tree; `cage.c` (716 lines) contains no `session_lock`/`layer_shell` references; upstream issue **#264 "Add support for ext-session-lock-v1" is open**. | Unresolved — three candidate designs in §12. Autologin is **not** committed until one is chosen and demonstrated. |
+| **Lock the screen under cage with swaylock** | Cage implements neither `ext-session-lock-v1` nor layer-shell. **Verified:** no `session_lock.c` in the source tree; `cage.c` (716 lines) contains no `session_lock`/`layer_shell` references; upstream issue **#264 "Add support for ext-session-lock-v1" is open**. | **Cage rejected.** Minimal sway plus swaylock is the selected hypothesis (D34), pending spike 1. Autologin remains **not** committed until that spike passes. |
 
 ---
 
@@ -859,7 +859,10 @@ One-way, and the reason M0 comes first. Every fact becomes unobtainable after in
 **Handling.** Raw output goes to `notes/hardware/`, **which is gitignored** — it contains serial
 numbers, MAC addresses, filesystem UUIDs and hostnames, and D1 commits to keeping personal data out
 of a publishable artifact. The committed artifact is `notes/hardware/tensorbook-profile.md`: redacted
-*facts* ("two 1 TB NVMe drives, both 512e/4Kn"), never raw command output. Keep a copy of the raw
+*facts* ("two 1 TB NVMe drives, 512-byte logical and reported physical sectors"), never raw
+command output. Describe sector geometry only as the device reports it — "512e" specifically means
+512-byte logical over 4096-byte physical, and claiming it without a 4096 physical reading is a claim
+about the hardware that the capture does not support. Keep a copy of the raw
 capture off-machine; the Tensorbook is wiped three times across M2–M4.
 
 ### 15.1 Facts required, and what each one decides

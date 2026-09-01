@@ -68,36 +68,58 @@ Corrections worth remembering because they were inherited errors, not typos:
 
 ## State of the work
 
-- ✅ Design spec at **revision 2.2, frozen**
-- ✅ `scripts/capture-hardware.sh` — lints clean, tested on macOS (degradation path), **not yet run
-  on the Tensorbook**. This is milestone M0 and it is one-way; it should happen before more
-  architecture work.
-- ⬜ Four component specs, commissioned in §7 but **not written**:
-  `cdl-install-and-packaging`, `cdl-security-and-recovery`, `cdl-agent-lifecycle`,
-  `cdl-first-boot-and-environment`
+**M0 is PARTIALLY COMPLETE.** The capture ran as root on the Tensorbook 2026-09-01, was transferred
+by email, and was decoded locally and verified byte-identical (sha256) against the user's own copy.
+
+- ✅ Design spec at **revision 2.3, frozen**
+- ✅ **Initial capture run on the Tensorbook**; redacted profile committed as
+  `notes/hardware/tensorbook-profile.md`. Raw capture is gitignored.
+- ✅ **R18/D35/P8 recorded** — docking station and external monitor. Independently reinforces D34.
+  The dock follow-up is deferred to M2 as §16.6, because one docking station is shared with the Mac.
+- 🛑 **D29 is blocked** under the current Secure Boot posture: `/sys/power/state` reads `freeze mem`
+  with no `disk`. Indicated cause is kernel lockdown; not yet directly confirmed. §3.2 branch.
+- ⬜ **M0 still open on:** SMART health and endurance, direct lockdown-state confirmation,
+  NVMe-native controller detail, firmware answers (VMD/RST, graphics mode, whether Secure Boot can
+  be disabled, BIOS password), and the fan-control interface inventory.
+  **Do not mark M0 complete until those are recorded.**
+- ⬜ Four component specs, commissioned in §7 but **not written**
 - ⬜ Three risk spikes (§9), none started
+
+### What M0 has already settled
+
+| Question | Answer |
+|-|-|
+| Both drives NVMe? | **Yes** — two identical Samsung `MZVL21T0HCLR-00B00`. Mixed-media concern retired; the other RAID0 risks are not |
+| RAM | **64 GB** (2×32 DDR4-3200), two slots free → 128 GB possible, which is a swap-sizing decision |
+| Console/display path | Internal panel `eDP-1` on the **Intel iGPU** → better rescue behaviour. External outputs split across both GPUs |
+| Wifi | Intel AX210 on in-kernel `iwlwifi` → **no firmware package needed** |
+| GPU | RTX 3080 Laptop, **16 GB VRAM** → sets the local-model ceiling |
+| Hibernation | **Unavailable** as configured. Blocks D29, not M1 or M2 |
 
 ## Resume here
 
-1. **Run `scripts/capture-hardware.sh` on the Tensorbook** with sudo (M0). One-way and blocking for
-   five design decisions. Produces: ignored raw capture, an off-machine copy, and a committed
-   redacted `notes/hardware/tensorbook-profile.md`, plus explicit go/no-go on VMD, dual-NVMe
-   striping, GPU/display topology, sleep support, swap size, Secure Boot posture, thermal baseline.
-2. **Write `cdl-agent-lifecycle`** — first component spec, drives M1. First executable slice is one
-   local interactive agent; do not deep-specify cloud, HF, Slurm or GPU scheduling, which are
-   extension points around a proven local lifecycle.
-3. **Write only the M1 slice** of `cdl-first-boot-and-environment` (session closure, sway/kitty/
-   swaylock/zellij/fonts/croft, keybinding generation, Emacs + LLM integration, provider enrollment
-   and bounded `cdl doctor`, offline startup, non-JS browser). Defer CUDA, VPN, thermal policy,
-   model GC and LaTeX sizing until M0 returns facts.
-4. **Run spikes 1 and 2.** Spike 1: tty login → sway → kitty → zellij → swaylock, testing normal
-   lock, idle lock, lid, locker crash, compositor crash, tty2 recovery. Spike 2: launch → attach →
-   detach → logout → login → reattach → kill kitty/zellij → reattach → exit, with preserved status
-   and no prompt replay.
-5. **Do not yet specify** ISO construction, subiquity storage integration, apt repo hosting,
-   snapshot rollback, cloud/HF adapters, or hibernation implementation. Skeletal files are fine.
-6. §7.1 lists content that left revision 1 with **no written destination yet** — provider env-var
+1. **Finish M0.** On the Tensorbook: `sudo ./scripts/capture-followup.sh --skip-dock-test` — needs no
+   dock, installs `smartmontools` and `nvme-cli`, answers drive health and the lockdown question.
+   Then reboot into firmware and record VMD/RST vs AHCI, graphics mode, whether Secure Boot can be
+   disabled, and BIOS password state. Update the profile with all of it plus a final go/no-go table.
+2. **Write `cdl-agent-lifecycle`** — the correct first component spec; needs no hardware facts.
+   First vertical slice only: one local interactive agent → PTY allocated → registry entry → attach/
+   detach → terminal destroyed → reattach → exit status and logs retained → no prompt replay.
+   Settle the state machine, SQLite ownership, service/PTY relationship, crash reconciliation, and
+   the minimum sandbox boundary before any implementation.
+3. **Write the M1 slice** of `cdl-first-boot-and-environment`: authenticated tty login, minimal sway,
+   swaylock, kitty, zellij, croft, fonts, keybindings, Emacs plus one LLM integration, provider
+   enrollment and bounded `cdl doctor`, offline startup, non-JS browser, tty2 recovery. Docking is
+   M2 and must not expand spike 1 beyond confirming sway's multi-output support exists.
+4. **Run spikes 1 and 2.** Spike 1 starts from tty login → sway → kitty → zellij → swaylock; test
+   lock crash, compositor crash, idle, lid, tty2 recovery. Spike 2 follows the lifecycle slice.
+5. **Probe the NAS** before writing the backup spec: container support → rest-server → SSH/SFTP →
+   SMB fallback, in that order. That decides whether the append-only design is real (§16.3).
+6. **Secure Boot decision has a deadline, not urgency.** M1 does not need it. Before M3: confirm
+   lockdown state; test whether disabling Secure Boot exposes `disk`; confirm NVIDIA modules still
+   load; judge the security trade-off; then record the §3.2 branch. Swap sizing is due at the same
+   point — 136 GiB is defensible only if a 128 GB RAM upgrade is genuinely plausible, otherwise
+   72 GiB suffices for the measured hardware.
+7. §7.1 lists content that left revision 1 with **no written destination yet** — provider env-var
    spellings, llama-swap rationale, clustrix verdict, restic `--exclude-caches`/`CACHEDIR.TAG`,
    GRUB recovery menu. Source is in `notes/research/`. Each receiving spec must reconcile against it.
-7. **Open, blocked on the user:** name the one cloud provider (§16.4); decide whether to fund HF Jobs
-   (settled by one paid job submission); NAS make and model for the capability probe (§16.3).

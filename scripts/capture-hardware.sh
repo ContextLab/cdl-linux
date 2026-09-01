@@ -165,6 +165,25 @@ capture "Battery design capacity" "Dependency-free sysfs read, so it survives up
 capture "Battery state" "Critical-battery behaviour matters: UPower's default chain ends in PowerOff with no hibernation swap, which on an FDE machine means total session loss." \
     upower --dump
 
+section "Thermal and fan control"
+# READ-ONLY. Section 16.5 assigns M0 the job of recording what fan-control interfaces this
+# chassis exposes, because a verified first-hand report on this model says "I have not been
+# able to do any fan control at all" and D28 puts 1-2 local agents on the GPU. Nothing here
+# writes to pwm*, fan*, or any thermal setting -- M0 observes, it does not tune.
+# shellcheck disable=SC2016  # deliberate: the inner sh -c does the expanding, not us
+capture "Hardware monitoring chips" "Names the hwmon devices present. No hwmon entry for the EC means no fan telemetry, let alone fan control." \
+    sh -c 'for f in /sys/class/hwmon/hwmon*/name; do printf "%s: %s\n" "${f%/name}" "$(cat "$f" 2>/dev/null)"; done'
+# shellcheck disable=SC2016  # deliberate: the inner sh -c does the expanding, not us
+capture "Fan and PWM interfaces" "Whether fan speeds are even readable, and whether any writable pwm control exists. Absence here confirms the reported no-fan-control situation rather than leaving it hearsay." \
+    sh -c 'found=0; for f in /sys/class/hwmon/hwmon*/fan*_input /sys/class/hwmon/hwmon*/pwm[0-9]*; do [ -e "$f" ] || continue; found=1; printf "%s (mode %s): %s\n" "$f" "$(stat -c %a "$f" 2>/dev/null)" "$(cat "$f" 2>/dev/null || echo unreadable)"; done; [ "$found" = 0 ] && echo "no fan_input or pwm interfaces exposed"'
+# shellcheck disable=SC2016  # deliberate: the inner sh -c does the expanding, not us
+capture "Thermal zones" "Current temperatures and trip points. Sets the thermal baseline that M2 sustained-load testing is compared against." \
+    sh -c 'for f in /sys/class/thermal/thermal_zone*/type; do d="${f%/type}"; printf "%s: %s = %s\n" "$d" "$(cat "$f" 2>/dev/null)" "$(cat "$d/temp" 2>/dev/null)"; done'
+capture "Razer HID devices" "Razer chassis control tools bind to vendor 1532 USB/HID devices. Whether one is present decides if any third-party fan utility could work at all." \
+    sh -c 'lsusb 2>/dev/null | grep -i "1532\|razer" || echo "no Razer (1532) USB device found"'
+capture "CPU thermal and frequency driver" "Which driver governs CPU throttling, which is the other half of the sustained-load question." \
+    sh -c 'cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_driver 2>/dev/null || echo "no cpufreq scaling_driver"'
+
 section "Network"
 capture "Network controllers" "Wifi chipset determines the firmware package that must ship on the ISO." \
     lspci -nn

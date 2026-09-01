@@ -17,8 +17,23 @@
 # Everything else is read-only.
 #
 # Usage:
-#   sudo ./scripts/capture-followup.sh
-#   sudo ./scripts/capture-followup.sh --no-install    # diagnose only, install nothing
+#
+#   TO FINISH M0 — this is the command to run now:
+#     sudo ./scripts/capture-followup.sh --skip-dock-test
+#   It needs no docking station, installs smartmontools and nvme-cli, and answers the two
+#   questions M0 still owes: drive health and why hibernation is unavailable.
+#
+#   DURING M2, when the machine is docked in normal use:
+#     sudo ./scripts/capture-followup.sh
+#   The full run adds the interactive dock test, which needs you to physically undock and
+#   dock. The overview defers that to M2 deliberately (section 16.6) — it answers which GPU
+#   drives an external monitor, and nothing before M2 depends on it.
+#
+#   Other options:
+#     --no-install       diagnose only; install nothing
+#     --skip-dock-test   skip the interactive dock steps
+#     --strict           exit non-zero if essential M0 evidence is still missing,
+#                        instead of only printing warnings. For scripted or CI use.
 
 set -uo pipefail
 
@@ -90,12 +105,14 @@ fi
 
 INSTALL=1
 DOCK_TEST=1
+STRICT=0
 for arg in "$@"; do
     case "$arg" in
         --no-install)     INSTALL=0 ;;
         --skip-dock-test) DOCK_TEST=0 ;;
+        --strict)         STRICT=1 ;;
         -h|--help)
-            sed -n '2,30p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+            sed -n '2,/^set -/p' "${BASH_SOURCE[0]}" | sed '$d; s/^#\{1,\} \{0,1\}//; s/^#$//'
             exit 0 ;;
         *) echo "unknown option: $arg" >&2; exit 2 ;;
     esac
@@ -103,12 +120,13 @@ done
 
 if [[ $EUID -ne 0 ]]; then
     echo "This script needs root: smartctl reads the drives directly, and apt installs packages." >&2
-    echo "Re-run as:  sudo $0 ${1:-}" >&2
+    echo "Re-run as:  sudo $0 $*" >&2
     exit 1
 fi
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-warnings=()
+warnings=()   # worth knowing
+blocking=()   # essential M0 evidence that is still missing — M0 cannot be called complete
 
 # ---------------------------------------------------------------------------
 # 1. Install the two missing tools
@@ -184,6 +202,7 @@ elif grep -q 'nohibernate' <<<"$cmdline"; then
 elif [[ "$lockdown" == "unreadable" ]]; then
     echo "VERDICT         : INCONCLUSIVE — securityfs is not mounted, so lockdown state is unknown."
     echo "                  Try: mount -t securityfs securityfs /sys/kernel/security"
+    blocking+=("lockdown state unreadable: the cause of the missing 'disk' stays an inference")
 else
     echo "VERDICT         : UNEXPECTED — lockdown is inactive and nohibernate is unset, yet 'disk'"
     echo "                  is absent. That points at the kernel build (CONFIG_HIBERNATION) rather"
@@ -194,7 +213,7 @@ echo
 echo "--- drive health / RAID0 fitness ---"
 if ! command -v smartctl >/dev/null 2>&1; then
     echo "smartctl unavailable — cannot assess drive health."
-    warnings+=("no SMART data: the RAID0 go/no-go stays open")
+    blocking+=("no SMART data: the RAID0 drive-health go/no-go stays open")
 else
     mapfile -t drives < <(lsblk -d -n -o NAME,TRAN 2>/dev/null | awk '$2=="nvme"{print "/dev/"$1}')
     if [[ ${#drives[@]} -eq 0 ]]; then
@@ -349,11 +368,23 @@ fi
 
 # ---------------------------------------------------------------------------
 say "SUMMARY"
-if [[ ${#warnings[@]} -eq 0 ]]; then
-    echo "No warnings. Both drives look fit for a striped pair on these thresholds."
-else
+if [[ ${#blocking[@]} -gt 0 ]]; then
+    echo "ESSENTIAL M0 EVIDENCE STILL MISSING (${#blocking[@]}) — M0 is not complete:"
+    printf -- '  ! %s\n' "${blocking[@]}"
+    echo
+fi
+if [[ ${#warnings[@]} -gt 0 ]]; then
     echo "Warnings (${#warnings[@]}):"
     printf -- '  - %s\n' "${warnings[@]}"
+elif [[ ${#blocking[@]} -eq 0 ]]; then
+    echo "No warnings. Both drives look fit for a striped pair on these thresholds."
+fi
+
+if [[ ${#blocking[@]} -eq 0 ]]; then
+    echo
+    echo "Still needed to close M0 — reboot into firmware setup and record by hand:"
+    echo "  - Intel VMD/RST vs AHCI          - graphics mode"
+    echo "  - can Secure Boot be disabled?   - BIOS password set?"
 fi
 
 if [[ -n "$capture_out" ]]; then
@@ -362,3 +393,12 @@ if [[ -n "$capture_out" ]]; then
     echo "That file is gitignored and contains serials, MACs, UUIDs and the hostname."
     echo "Paste back only the DIAGNOSIS block above; keep a copy of the full file off-machine."
 fi
+
+# Default is diagnostic: report and exit 0, because a partial answer still has value.
+# --strict turns missing ESSENTIAL evidence into a failure, for scripted or gated use.
+if [[ $STRICT -eq 1 && ${#blocking[@]} -gt 0 ]]; then
+    echo
+    echo "--strict: exiting non-zero because essential M0 evidence is missing." >&2
+    exit 1
+fi
+exit 0

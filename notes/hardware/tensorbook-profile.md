@@ -1,6 +1,10 @@
 # Tensorbook hardware profile
 
 **Source:** `scripts/capture-hardware.sh`, run as root on 2026-09-01T02:19:32Z.
+**Status: M0 is PARTIALLY complete.** See "Capture gaps" and "Firmware settings" below — SMART
+health, lockdown state, the fan-control inventory and every firmware answer are still outstanding,
+and M0 must not be called complete until they are recorded. Re-run with
+`sudo scripts/capture-followup.sh --skip-dock-test`, which needs no docking station.
 **Raw capture:** `notes/hardware/tensorbook-<date>-raw.md` — gitignored, retained off-machine.
 
 Redacted: serial numbers, MAC addresses, filesystem UUIDs and hostname are deliberately absent.
@@ -28,13 +32,28 @@ This file records the *facts the design depends on*, per §15 of the design over
 | Current layout | Drive 1 holds the live system: 1 G vfat ESP at `/boot/efi`, 952.8 G ext4 at `/`. Drive 0 is **whole-disk ext4, no partition table, unmounted** |
 | Encryption | None. The current install is unencrypted |
 
-**The striping risk is retired.** Both drives are NVMe and identical, so the documented
-"1 TB NVMe + 1 TB M.2 SATA" Tensorbook variant — which would have made RAID0 actively harmful — does
-not apply to this unit. D4/D15 proceed as designed.
+**The drive-compatibility gate passes — and that is all it does.** Both drives are NVMe and
+identical, so the documented "1 TB NVMe + 1 TB M.2 SATA" Tensorbook variant, which would have made
+RAID0 actively harmful, does not apply to this unit. **The mixed-media striping concern is retired.**
 
-**One correction to carry into the install spec:** both drives report 512-byte physical *and*
-logical sectors, so the `--sector-size 4096` LUKS tuning is a dm-crypt-layer choice on a 512e device,
-not a match to a native 4K device. It remains permitted, and the throughput claim behind it is
+Calling this "the striping risk is retired" would be wrong, and an earlier draft of this file did.
+Every central RAID0 risk is still live:
+
+- Either drive failing destroys the entire volume (D4/D15, accepted deliberately).
+- **SMART health is still unknown** — `smartmontools` was not installed at capture time, so nothing
+  here says whether these two drives are actually healthy enough to stripe.
+- Off-machine backup remains load-bearing rather than a convenience.
+- The 4 KiB dm-crypt tuning that motivated the layout is **unmeasured on this hardware** and is
+  subagent-reported testimony.
+
+D4/D15 proceed as designed, on the same accepted terms as before — not on better ones.
+
+**One correction to carry into the install spec:** both drives report **512-byte logical and
+512-byte physical** sectors — i.e. 512n *as reported*. (Not "512e", which specifically means 512-byte
+logical over 4096-byte physical; nothing in the capture reports a 4096 physical sector, and NVMe
+devices commonly under-report their internal geometry, so the honest statement is what the device
+exposes.) The `--sector-size 4096` LUKS tuning is therefore a dm-crypt-layer choice made *on top of*
+a device reporting 512-byte sectors, not a match to a native 4K device. It remains permitted, and the throughput claim behind it is
 subagent-reported and still unverified (§17.2) — measure it on this hardware before relying on it.
 
 ## Memory — ✅ GO, with a sizing decision
@@ -122,6 +141,8 @@ permanently unavailable to agents.
 | `nvme-cli` not installed | No NVMe-native controller detail. Non-blocking — `lsblk` answered the drive-type question |
 | `smartmontools` not installed | **No SMART wear or error history.** This was a stated go/no-go input: under RAID0 either drive's failure loses everything, so their health matters. Install `smartmontools` and re-run before M3 |
 | Battery `charge_full_design` absent | Expected — this battery reports in energy units, and `energy_full_design` was captured |
+| Kernel lockdown state not read | The capture predated that check, so the cause of the missing `disk` is inference rather than observation. `capture-hardware.sh` reads it now |
+| Fan, hwmon and thermal-zone inventory absent | §16.5 assigns M0 the job of recording what fan-control interfaces this chassis exposes; the first capture predated those checks. Six read-only captures were added afterwards. **Pending the re-run** |
 
 ## Firmware settings — still outstanding
 
