@@ -13,6 +13,11 @@
 #
 # Run it with sudo for the full picture; without sudo it still runs and marks the privileged
 # items as NOT CAPTURED rather than silently omitting them.
+#
+# Install these first if they are missing - both answer go/no-go questions:
+#   sudo apt install -y smartmontools nvme-cli
+# smartmontools in particular: under RAID0 either drive's failure loses everything, so their
+# wear and error history is a decision input, not a curiosity.
 
 set -uo pipefail
 
@@ -141,6 +146,10 @@ capture "Supported sleep states" "The bracketed entry is active. Distinguishes s
     cat /sys/power/mem_sleep
 capture "Supported power states" "Confirms whether 'disk' (hibernate) is offered at all. D29 makes hibernation a launch requirement." \
     cat /sys/power/state
+capture "Kernel lockdown state" "Explains a MISSING 'disk' above. The kernel hides hibernation when LOCKDOWN_HIBERNATION is blocked, which Secure Boot triggers via lockdown integrity mode. Without this, an absent 'disk' has no diagnosis." \
+    cat /sys/kernel/security/lockdown
+capture "Configured resume device" "Whether hibernation has ever been wired up on this install." \
+    sh -c 'cat /sys/power/resume /sys/power/resume_offset 2>/dev/null'
 capture "Battery design capacity" "Dependency-free sysfs read, so it survives upower being absent." \
     sh -c 'cat /sys/class/power_supply/BAT*/energy_full_design /sys/class/power_supply/BAT*/charge_full_design 2>/dev/null'
 capture "Battery state" "Critical-battery behaviour matters: UPower's default chain ends in PowerOff with no hibernation swap, which on an FDE machine means total session loss." \
