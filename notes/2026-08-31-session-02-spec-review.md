@@ -68,47 +68,54 @@ Corrections worth remembering because they were inherited errors, not typos:
 
 ## State of the work
 
-**M0 is PARTIALLY COMPLETE.** The capture ran as root on the Tensorbook 2026-09-01, was transferred
-by email, and was decoded locally and verified byte-identical (sha256) against the user's own copy.
+**M0 is complete except the firmware gate.** The initial capture ran 2026-08-31 and the follow-up
+ran 2026-09-01, publishing itself to the repo automatically (commit `1b7fb86`).
 
 - ✅ Design spec at **revision 2.3, frozen**
-- ✅ **Initial capture run on the Tensorbook**; redacted profile committed as
-  `notes/hardware/tensorbook-profile.md`. Raw capture is gitignored.
-- ✅ **R18/D35/P8 recorded** — docking station and external monitor. Independently reinforces D34.
-  The dock follow-up is deferred to M2 as §16.6, because one docking station is shared with the Mac.
-- 🛑 **D29 is blocked** under the current Secure Boot posture: `/sys/power/state` reads `freeze mem`
-  with no `disk`. Indicated cause is kernel lockdown; not yet directly confirmed. §3.2 branch.
-- ⬜ **M0 still open on:** SMART health and endurance, direct lockdown-state confirmation,
-  NVMe-native controller detail, firmware answers (VMD/RST, graphics mode, whether Secure Boot can
-  be disabled, BIOS password), and the fan-control interface inventory.
-  **Do not mark M0 complete until those are recorded.**
+- ✅ **Capture + follow-up both run on the Tensorbook.** Redacted profile committed as
+  `notes/hardware/tensorbook-profile.md`; the diagnosis as
+  `notes/hardware/tensorbook-20260901T124921Z-diagnosis.md`. Raw captures stay gitignored.
+- ✅ **R18/D35/P8 recorded** — docking station and external monitor. Dock identified as a **USB4
+  "T4801"**, already authorized with `iommu` policy. Which GPU drives it is deferred to M2 (§16.6).
+- 🛑 **D29 is blocked, and the cause is now CONFIRMED** rather than inferred: lockdown reads
+  `none [integrity] confidentiality`, with `nohibernate` unset. Secure Boot → lockdown →
+  hibernation blocked. §3.2 is a live decision due before M3.
+- ⬜ **Firmware gate still open** — four observations needing a reboot into setup.
 - ⬜ Four component specs, commissioned in §7 but **not written**
 - ⬜ Three risk spikes (§9), none started
 
-### What M0 has already settled
+### What M0 settled
 
 | Question | Answer |
 |-|-|
-| Both drives NVMe? | **Yes** — two identical Samsung `MZVL21T0HCLR-00B00`. Mixed-media concern retired; the other RAID0 risks are not |
-| RAM | **64 GB** (2×32 DDR4-3200), two slots free → 128 GB possible, which is a swap-sizing decision |
-| Console/display path | Internal panel `eDP-1` on the **Intel iGPU** → better rescue behaviour. External outputs split across both GPUs |
+| Both drives NVMe? | **Yes** — two identical Samsung `MZVL21T0HCLR-00B00`. Mixed-media concern retired; other RAID0 risks stand |
+| Drive health | **Both PASSED.** 0 media errors, 100% spare, 2% and 0% endurance used. Striping this pair is defensible |
+| Sector geometry | **One LBA format, 512 B, in use.** No 4K format exists. Not 512e, not native-4K-presenting-512 |
+| RAM | **64 GB** (2×32 DDR4-3200), two slots free → swap-sizing decision |
+| Console/display | Internal panel `eDP-1` on the **Intel iGPU** → better rescue behaviour |
 | Wifi | Intel AX210 on in-kernel `iwlwifi` → **no firmware package needed** |
-| GPU | RTX 3080 Laptop, **16 GB VRAM** → sets the local-model ceiling |
-| Hibernation | **Unavailable** as configured. Blocks D29, not M1 or M2 |
+| GPU | RTX 3080 Laptop, **16 GB VRAM** |
+| Hibernation | **Unavailable**, cause confirmed as Secure Boot lockdown |
+| Fan control | **None exists** — 0 fan inputs, 0 writable PWM. 29 cooling devices = throttling only |
+
+### Anomalies recorded, not yet explained
+
+- **Unsafe shutdowns: 65 and 66** against 255 and 206 power-on hours — about one unclean shutdown
+  per 3–4 hours of uptime. Matters because RAID0 has no redundancy for a torn write and btrfs must
+  survive them. Explain before M3 commits to the layout.
+- **`nvme0n1`: 48.0 TB written in 255 hours** (~52 MB/s sustained, ~47 drive-writes) versus 5.5 TB
+  on the system drive. The two drives are not equally worn. Endurance still 2%, so context rather
+  than a fault.
+- **NVIDIA connectors absent** from the follow-up run though the first capture saw them — dGPU
+  likely runtime-suspended. Re-check while docked; bears on §16.6.
 
 ## Resume here
 
-1. **Finish M0.** On the Tensorbook, two commands: `git pull` then
-   `sudo ./scripts/capture-followup.sh`. Needs no dock (the dock test is off by default per
-   §16.6), installs `smartmontools` and `nvme-cli`, answers drive health and the lockdown
-   question, and commits+pushes the redaction-checked diagnosis file automatically — so
-   nothing has to be copied between machines. The push is blocked if the redaction scan
-   finds any identifier.
-   Then reboot into firmware and record VMD/RST vs AHCI, graphics mode, whether Secure Boot can be
-   disabled, and BIOS password state. Update the profile with all of it plus a final go/no-go table.
+1. **Close the firmware gate.** Reboot into setup and record: Intel VMD/RST vs AHCI; graphics mode;
+   **whether Secure Boot can be disabled** (now load-bearing for D29); BIOS password state.
 2. **Write `cdl-agent-lifecycle`** — the correct first component spec; needs no hardware facts.
-   First vertical slice only: one local interactive agent → PTY allocated → registry entry → attach/
-   detach → terminal destroyed → reattach → exit status and logs retained → no prompt replay.
+   First vertical slice only: one local interactive agent → PTY allocated → registry entry →
+   attach/detach → terminal destroyed → reattach → exit status and logs retained → no prompt replay.
    Settle the state machine, SQLite ownership, service/PTY relationship, crash reconciliation, and
    the minimum sandbox boundary before any implementation.
 3. **Write the M1 slice** of `cdl-first-boot-and-environment`: authenticated tty login, minimal sway,
@@ -118,12 +125,16 @@ by email, and was decoded locally and verified byte-identical (sha256) against t
 4. **Run spikes 1 and 2.** Spike 1 starts from tty login → sway → kitty → zellij → swaylock; test
    lock crash, compositor crash, idle, lid, tty2 recovery. Spike 2 follows the lifecycle slice.
 5. **Probe the NAS** before writing the backup spec: container support → rest-server → SSH/SFTP →
-   SMB fallback, in that order. That decides whether the append-only design is real (§16.3).
-6. **Secure Boot decision has a deadline, not urgency.** M1 does not need it. Before M3: confirm
-   lockdown state; test whether disabling Secure Boot exposes `disk`; confirm NVIDIA modules still
-   load; judge the security trade-off; then record the §3.2 branch. Swap sizing is due at the same
-   point — 136 GiB is defensible only if a 128 GB RAM upgrade is genuinely plausible, otherwise
-   72 GiB suffices for the measured hardware.
+   SMB fallback, in that order (§16.3).
+6. **Two decisions due before M3, not now.** The §3.2 Secure Boot ↔ hibernation branch, and swap
+   sizing — 136 GiB only if a 128 GB RAM upgrade is genuinely plausible, else 72 GiB.
 7. §7.1 lists content that left revision 1 with **no written destination yet** — provider env-var
    spellings, llama-swap rationale, clustrix verdict, restic `--exclude-caches`/`CACHEDIR.TAG`,
    GRUB recovery menu. Source is in `notes/research/`. Each receiving spec must reconcile against it.
+
+## Tooling built this session
+
+- `scripts/capture-hardware.sh` — 42 read-only captures; timestamped, no-clobber output.
+- `scripts/capture-followup.sh` — installs tools, re-captures, diagnoses, redaction-checks, and
+  auto-commits/pushes the safe diagnosis. Git runs as `$SUDO_USER`, not root.
+- `tests/run-all.sh`, `tests/test-dock-diff.sh`, `tests/test-capture-safety.sh` — 37 checks.

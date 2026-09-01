@@ -220,17 +220,69 @@ permanently unavailable to agents.
 | Which GPU drives a docked external monitor | ⬜ **Deferred to M2** (§16.6). The follow-up did identify the dock itself: a **USB4 dock, "T4801" (Shenzhen Lianfaxun)**, already authorized with `iommu` policy, showing `disconnected` at capture time |
 | NVIDIA connectors absent from this run | ⬜ Only `card1` (i915) connectors were enumerated this time, though the first capture saw `card0-DP-5`…`DP-8` and `HDMI-A-1`. Most likely the dGPU was runtime-suspended or unbound. **Re-check while docked** — it bears directly on §16.6 |
 
-## Firmware settings — still outstanding
+## Firmware settings — the M0 gate, and what is worth changing
 
-Requires a reboot into setup; not obtainable from a running system.
+Requires a reboot into setup. Menu names differ between firmware revisions, so these are described
+by what they do; if a setting is not exposed, record that it is absent — an absence is a finding.
 
-- [ ] **Intel VMD/RST vs AHCI** — the highest-consequence unknown. Both drives are visible to a
-      running Linux kernel with a standard NVMe driver, which is *suggestive* that VMD is off, but it
-      is not proof and the installer's behaviour is what matters.
-- [ ] **Chipset graphics mode** — the DRM topology already shows hybrid with the panel on the iGPU,
-      so this is now confirmation rather than discovery.
-- [ ] **Can Secure Boot be disabled?** — newly load-bearing; see below.
+**Record before changing anything**, so the starting state is recoverable.
+
+### Must record (the M0 gate)
+
+- [ ] **Intel VMD/RST vs AHCI** — highest-consequence unknown. Both drives are visible to a running
+      Linux kernel with the standard `nvme` driver, which is *suggestive* that VMD is off, but the
+      installer's behaviour is what matters. **If VMD is on, turn it off** — otherwise a stock
+      installer may see no disks at all.
+- [ ] **Chipset graphics mode** — hybrid vs dedicated-GPU-only. The DRM topology already shows
+      hybrid with the panel on the iGPU, so this is confirmation rather than discovery. See below
+      before changing it.
+- [ ] **Can Secure Boot be disabled?** — now load-bearing: it is the D29 decision.
 - [ ] **Is a BIOS password set?**
+
+### Worth changing, each tied to a measurement
+
+| Setting | Recommendation | Why, from the captures |
+|-|-|-|
+| **Secure Boot** | **The D29 decision.** Do not disable it merely to finish M0 — record that it *can* be, and decide before M3 | Measured: lockdown `[integrity]` is active and is what hides `disk`. Disabling Secure Boot is the only way to get hibernation on a stock Ubuntu kernel here. Cost: an unverified boot chain |
+| **Fan / thermal profile** (if a performance or cooling-profile setting exists) | **Set the most aggressive cooling profile available** | Measured: 0 fan inputs, 0 writable PWM — the OS cannot influence fans *at all*. Firmware is the only place a fan curve can be chosen, and D28 puts 1–2 local agents on the GPU |
+| **Thunderbolt / USB4 security level** | **Lower it, or pre-authorise the dock** | The dock (`T4801`, USB4) is already `stored` with `iommu` policy, so this may already be fine. But on a TUI-only machine there is no GUI to approve a new Thunderbolt device — an authorisation prompt has nowhere to appear, and the dock would simply not work. `iommu` policy keeps DMA protection while removing the prompt |
+| **Fast Boot** | **Disable** | Fast Boot commonly skips USB initialisation. The design requires installing from USB *and* permanently retaining a live-USB rescue path (§11); a rescue stick that will not boot is not a rescue path |
+| **Wake on USB / XHC wake** | **Disable if exposed** | Research flagged spurious wake from XHC on this chassis. Also a candidate explanation for the 65–66 unsafe shutdowns: a machine that wakes in a bag or fails to resume gets power-cycled by hand |
+| **Sleep mode: S3 vs Modern Standby / S0ix** | **Keep S3** — verify it stays selected | Measured: `mem_sleep` reads `s2idle [deep]`, so deep S3 is available and selected. That is the good outcome; research links s2idle on this chassis to suspend failures |
+
+### Leave alone
+
+- **TPM** — present and usable (`MSFT0101:00`, `tpm_crb`), but D7 rejected TPM auto-unlock. No
+  reason to change it; no reason to disable it either.
+- **Intel SpeedShift / CPU power management** — `intel_pstate` is the active scaling driver and
+  wants these enabled.
+- **VT-d / IOMMU** — leave **enabled**. The Thunderbolt `iommu` policy depends on it, and it is what
+  makes a lower Thunderbolt security level defensible rather than reckless.
+
+### The graphics-mode trade-off, now that docking is a requirement (R18)
+
+This one has no obviously right answer and should be decided, not defaulted:
+
+- **Keep hybrid** (current): the internal panel is on the Intel iGPU, so a broken NVIDIA driver does
+  not black out the laptop screen — measured, and the reason §12 calls the rescue story milder than
+  assumed. Better battery life. Cost: external outputs on the NVIDIA connectors under a Wayland
+  compositor are the fiddlier path.
+- **Dedicated-GPU-only**: every output lands on one driver, which is usually simpler for external
+  monitors. Cost: the internal panel then depends on the NVIDIA driver too, which **removes the
+  rescue advantage M0 just discovered**, and costs battery.
+
+**Provisional recommendation: keep hybrid.** The rescue path is worth more to this design than an
+easier external-display setup, and §16.6 has not yet established that the dock even lands on an
+NVIDIA connector. Revisit if the M2 dock test shows otherwise.
+
+### Firmware age
+
+BIOS **1.02, dated 2022-02-12** — 4.5 years old. Worth checking for an update, with two cautions:
+research found LVFS coverage for this class of chassis is poor, so `fwupdmgr` may not offer one; and
+vendor updaters are often Windows-only, which is awkward now that this machine no longer has
+Windows. Check `fwupdmgr get-devices` before assuming either way. A firmware update is also a
+plausible fix for the suspend quirks behind the unsafe-shutdown count — but it is a risk in itself,
+and nothing in the design currently depends on it.
 
 ---
 
