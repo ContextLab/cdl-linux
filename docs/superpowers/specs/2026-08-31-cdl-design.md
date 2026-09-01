@@ -966,6 +966,30 @@ thermals are a first-class risk.
 
 What remains genuinely open is only the measurement, which M0 and M2 supply.
 
+### 16.6 Which GPU drives the docked external monitor
+
+**Deliberately deferred, not forgotten.** R18/D35 are recorded and the compositor decision (D34) does
+not depend on the answer — sway is chosen on P4 and P8 regardless of which GPU owns the dock's
+output. What the answer changes is narrow: one line of recovery planning, and the connector names in
+the output-layout configuration.
+
+The measured topology says `HDMI-A-1` and `DP-5`…`DP-8` are on the NVIDIA GPU while `DP-1`…`DP-4` are
+on the Intel iGPU, so both outcomes are live:
+
+- **Dock on an NVIDIA connector** → a docked external monitor depends on the NVIDIA driver, and
+  recovery planning must assume a broken driver costs the external display even though the internal
+  panel survives.
+- **Dock on an Intel connector** → it does not, and the "milder failure mode" conclusion holds
+  docked as well as undocked.
+
+**Why it is deferred:** the operator shares one docking station between the Tensorbook and their Mac,
+so the test costs a physical swap rather than a command. It is not worth that until the Tensorbook is
+docked anyway.
+
+**Resolution:** run `sudo scripts/capture-followup.sh` during M2, when the machine is docked in normal
+use. It walks both observations and names the connector. Until then this is an open parameter in
+`cdl-first-boot-and-environment` §display — an unknown with a known resolution step, not a placeholder.
+
 ---
 
 ## 17. Evidence standards
