@@ -15,30 +15,46 @@
 # DIAGNOSIS file — a few KB rather than the 70 KB raw capture.
 #
 # SHARING THE RESULT. There is no shared clipboard between the Tensorbook and the machine
-# running the design work, so the diagnosis is written to its own file, built to be sent:
-# it carries no serial numbers, MAC addresses or filesystem UUIDs, so it needs no
-# redaction before emailing or committing. Its path is printed in a banner at the end.
-# The RAW capture is a separate, much larger file that is NOT safe to share as-is.
+# running the design work, so the diagnosis is written to its own small file and, by
+# default, committed and pushed automatically — nothing to attach or copy across.
+#
+# That push is HARD-GATED: every run scans the generated file for MAC addresses, UUIDs,
+# labelled serials and private IP addresses, and a single hit blocks the push entirely.
+# The repository may be public and git history cannot be recalled, so the gate refuses
+# rather than warns. Use --no-push to keep it local and send it by hand instead.
+#
+# The RAW capture is a separate, much larger file that is NOT safe to share as-is: it
+# carries serials, MACs, filesystem UUIDs and the hostname. It is gitignored fail-closed
+# and is never pushed. Use --keep-raw PATH to copy it to a USB stick.
 #
 # It changes the system in exactly one way: installing smartmontools and nvme-cli via apt.
 # Everything else is read-only.
 #
 # Usage:
 #
-#   TO FINISH M0 — this is the command to run now:
-#     sudo ./scripts/capture-followup.sh --skip-dock-test
-#   It needs no docking station, installs smartmontools and nvme-cli, and answers the two
-#   questions M0 still owes: drive health and why hibernation is unavailable.
+#   TO FINISH M0 — two commands, nothing else:
+#     git pull
+#     sudo ./scripts/capture-followup.sh
+#
+#   That installs smartmontools and nvme-cli, re-runs the capture, diagnoses why
+#   hibernation is unavailable, assesses drive health, checks the diagnosis for
+#   identifiers, and — only if that check passes — commits and pushes the diagnosis file.
+#   No docking station needed; the dock test is off by default (section 16.6 defers it
+#   to M2). Nothing to attach, paste, or copy between machines.
+#
+#   Git runs as the user who invoked sudo, not as root, so it uses your identity and
+#   credentials and leaves no root-owned files behind.
 #
 #   DURING M2, when the machine is docked in normal use:
-#     sudo ./scripts/capture-followup.sh
-#   The full run adds the interactive dock test, which needs you to physically undock and
-#   dock. The overview defers that to M2 deliberately (section 16.6) — it answers which GPU
-#   drives an external monitor, and nothing before M2 depends on it.
+#     sudo ./scripts/capture-followup.sh --dock-test
+#   Adds the interactive dock test, which asks you to physically undock and dock.
 #
 #   Other options:
 #     --no-install       diagnose only; install nothing
-#     --skip-dock-test   skip the interactive dock steps
+#     --skip-dock-test   accepted and ignored; the dock test is already off by default
+#     --no-push          do not commit or push; just name the file to send
+#     --dock-test        add the interactive undock/dock steps (M2)
+#     --no-strict        report missing evidence but still exit 0
 #     --keep-raw PATH    also copy the raw capture somewhere (a USB stick, say)
 #     --strict           exit non-zero if essential M0 evidence is still missing,
 #                        instead of only printing warnings. For scripted or CI use.
@@ -118,6 +134,84 @@ PATTERNS
     return 0
 }
 
+# Runs a command as the user who invoked sudo, rather than as root. Git under sudo would
+# use root's config and credentials — usually no identity and no GitHub access — and would
+# leave root-owned objects in a repository owned by someone else. Outside sudo this is a
+# straight pass-through.
+as_user() {
+    if [[ -n "${SUDO_USER:-}" && "$SUDO_USER" != "root" ]]; then
+        sudo -u "$SUDO_USER" -- "$@"
+    else
+        "$@"
+    fi
+}
+
+# Commits and pushes ONE file: the redaction-checked diagnosis. Echoes what it did.
+#
+# Refuses, loudly and without pushing, if anything is unsafe or unavailable. It never
+# reports success it did not achieve — a silent "pushed" that did not push would send the
+# operator away believing the evidence was shared.
+#
+# Args: <diagnosis file> <leaks string, empty when the redaction check passed>
+publish_diagnosis() {
+    local file="$1" leaks="$2" repo branch
+
+    # HARD GATE. This pushes to a repository that may be public, and git history cannot be
+    # recalled. Nothing below runs unless the redaction scan came back empty.
+    if [[ -n "$leaks" ]]; then
+        echo "NOT pushing: the redaction check found identifiers in $file." >&2
+        echo "Fix or remove them, then push by hand if you still want to." >&2
+        return 1
+    fi
+    [[ -s "$file" ]] || { echo "NOT pushing: $file is missing or empty." >&2; return 1; }
+    command -v git >/dev/null 2>&1 || { echo "NOT pushing: git is not installed." >&2; return 1; }
+
+    repo="$(as_user git -C "$(dirname "$file")" rev-parse --show-toplevel 2>/dev/null)" || repo=""
+    if [[ -z "$repo" ]]; then
+        echo "NOT pushing: $file is not inside a git repository." >&2
+        return 1
+    fi
+
+    # Hand ownership back before touching git, so a sudo run does not leave root-owned
+    # files in a repository the operator has to keep working in afterwards.
+    if [[ -n "${SUDO_USER:-}" && "$SUDO_USER" != "root" ]]; then
+        chown "$SUDO_USER" "$file" 2>/dev/null || true
+    fi
+
+    branch="$(as_user git -C "$repo" rev-parse --abbrev-ref HEAD 2>/dev/null)"
+    echo "Publishing $(basename "$file") to $branch..."
+
+    # Rebase first so a push cannot fail merely because the remote moved on.
+    if ! as_user git -C "$repo" pull --rebase --quiet 2>/dev/null; then
+        echo "  note: pull --rebase failed or was unnecessary; continuing." >&2
+    fi
+
+    # -f is required because notes/hardware/ is gitignored fail-closed, which is deliberate:
+    # it keeps the RAW capture out of git. Forcing here is safe only because the redaction
+    # gate above already passed for this specific file.
+    if ! as_user git -C "$repo" add -f "$file" 2>/dev/null; then
+        echo "NOT pushing: git add failed." >&2
+        return 1
+    fi
+
+    if as_user git -C "$repo" diff --cached --quiet -- "$file" 2>/dev/null; then
+        echo "  nothing new to commit — this diagnosis is already recorded."
+    elif ! as_user git -C "$repo" commit --quiet -m "M0 diagnosis: $(basename "$file")" -- "$file" 2>/dev/null; then
+        echo "NOT pushing: git commit failed (is user.name/user.email configured?)." >&2
+        return 1
+    fi
+
+    if as_user git -C "$repo" push --quiet 2>/dev/null; then
+        echo "  pushed. Nothing further needed — the diagnosis is in the repository."
+        return 0
+    fi
+    echo "PUSH FAILED — the commit exists locally but did NOT reach the remote." >&2
+    echo "  Likely no credentials or no network on this machine." >&2
+    echo "  Either run:  git -C $repo push" >&2
+    echo "  or email this file instead:  $file" >&2
+    return 1
+}
+
 snapshot_thunderbolt() {
     find /sys/bus/thunderbolt/devices/ -mindepth 1 -maxdepth 1 -printf '%f\n' 2>/dev/null | sort
 }
@@ -151,8 +245,9 @@ if [[ "${BASH_SOURCE[0]}" != "${0}" ]]; then
 fi
 
 INSTALL=1
-DOCK_TEST=1
-STRICT=0
+DOCK_TEST=0     # off by default: §16.6 defers the dock test to M2
+STRICT=1        # on by default: the recommended mode; affects the exit code only
+PUSH=1          # on by default, but HARD-GATED on the redaction check passing
 KEEP_RAW=""
 KEEP_RAW_NEXT=0
 for arg in "$@"; do
@@ -160,6 +255,9 @@ for arg in "$@"; do
         --no-install)     INSTALL=0 ;;
         --skip-dock-test) DOCK_TEST=0 ;;
         --strict)         STRICT=1 ;;
+        --no-strict)      STRICT=0 ;;
+        --dock-test)      DOCK_TEST=1 ;;
+        --no-push)        PUSH=0 ;;
         --keep-raw)       KEEP_RAW_NEXT=1 ;;
         /*|./*|~*)        if [[ $KEEP_RAW_NEXT -eq 1 ]]; then KEEP_RAW="$arg"; KEEP_RAW_NEXT=0
                           else echo "unexpected path argument: $arg" >&2; exit 2; fi ;;
@@ -538,17 +636,20 @@ fi
 
 echo
 printf '\033[1m===============================================================\033[0m\n'
-printf '\033[1m SEND THIS ONE FILE:\033[0m\n'
-printf '   %s\n' "$diag_file"
-printf '   (%s)\n' "$(du -h "$diag_file" 2>/dev/null | cut -f1 | tr -d ' ') — small enough to attach or paste"
-echo
-echo " It is redaction-safe: no serials, MACs or UUIDs. Email it, or if this"
-echo " machine has the repo checked out and push access, simply:"
-echo
-echo "     git add -f \"$diag_file\" && git commit -m 'M0 follow-up diagnosis' && git push"
-echo
-echo " (-f is needed because notes/hardware/ is gitignored by default, which is"
-echo "  deliberate: the RAW capture must never be committed.)"
+if [[ $PUSH -eq 1 ]]; then
+    if publish_diagnosis "$diag_file" "$leaks"; then
+        printf '\033[1m DIAGNOSIS PUBLISHED — no further action needed.\033[0m\n'
+    else
+        printf '\033[1m COULD NOT PUBLISH — send this file instead:\033[0m\n'
+        printf '   %s  (%s)\n' "$diag_file" \
+            "$(du -h "$diag_file" 2>/dev/null | cut -f1 | tr -d ' ')"
+        warnings+=("diagnosis was not published; send $diag_file by hand")
+    fi
+else
+    printf '\033[1m SEND THIS ONE FILE (--no-push was given):\033[0m\n'
+    printf '   %s  (%s)\n' "$diag_file" \
+        "$(du -h "$diag_file" 2>/dev/null | cut -f1 | tr -d ' ')"
+fi
 printf '\033[1m===============================================================\033[0m\n'
 
 if [[ -n "${capture_out:-}" ]]; then

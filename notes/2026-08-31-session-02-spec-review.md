@@ -98,8 +98,12 @@ by email, and was decoded locally and verified byte-identical (sha256) against t
 
 ## Resume here
 
-1. **Finish M0.** On the Tensorbook: `sudo ./scripts/capture-followup.sh --skip-dock-test` — needs no
-   dock, installs `smartmontools` and `nvme-cli`, answers drive health and the lockdown question.
+1. **Finish M0.** On the Tensorbook, two commands: `git pull` then
+   `sudo ./scripts/capture-followup.sh`. Needs no dock (the dock test is off by default per
+   §16.6), installs `smartmontools` and `nvme-cli`, answers drive health and the lockdown
+   question, and commits+pushes the redaction-checked diagnosis file automatically — so
+   nothing has to be copied between machines. The push is blocked if the redaction scan
+   finds any identifier.
    Then reboot into firmware and record VMD/RST vs AHCI, graphics mode, whether Secure Boot can be
    disabled, and BIOS password state. Update the profile with all of it plus a final go/no-go table.
 2. **Write `cdl-agent-lifecycle`** — the correct first component spec; needs no hardware facts.

@@ -200,6 +200,63 @@ modelfile="$tmp/models.md"
 printf 'SAMSUNG MZVL21T0HCLR-00B00\nNVIDIA GeForce RTX 3080 Laptop GPU\nTensorBook (late 2021)\n' > "$modelfile"
 check "model numbers are not flagged as identifiers" "" "$(diagnosis_leaks "$modelfile")"
 
+# ---------------------------------------------------------------------------
+echo
+echo "== publish gate =="
+# ---------------------------------------------------------------------------
+# The script now commits and pushes the diagnosis automatically. The repository may be
+# PUBLIC and git history cannot be recalled, so the gate that stops an unsafe push is the
+# single most important behaviour in this file. Every case below runs in a throwaway
+# directory: none of it can reach the real repository.
+pub_tmp="$tmp/publish"; mkdir -p "$pub_tmp"
+
+printf 'some diagnosis content\n' > "$pub_tmp/d.md"
+publish_diagnosis "$pub_tmp/d.md" "UUID: 12:uuid 00b5cf1e-..." >/dev/null 2>&1
+check "a failed redaction check blocks the push" "1" "$?"
+
+: > "$pub_tmp/empty.md"
+publish_diagnosis "$pub_tmp/empty.md" "" >/dev/null 2>&1
+check "an empty diagnosis file is refused" "1" "$?"
+
+publish_diagnosis "$pub_tmp/d.md" "" >/dev/null 2>&1
+check "a file outside any git repository is refused" "1" "$?"
+
+publish_diagnosis "$pub_tmp/does-not-exist.md" "" >/dev/null 2>&1
+check "a missing diagnosis file is refused" "1" "$?"
+
+# A repository with no remote: the commit should succeed and the push should fail, and the
+# script must report the failure rather than implying the evidence was shared.
+repo="$pub_tmp/repo"
+mkdir -p "$repo/notes/hardware"
+(
+    cd "$repo" || exit 1
+    git init -q
+    git config user.email test@example.invalid
+    git config user.name "Test"
+    printf 'notes/hardware/*\n' > .gitignore
+    printf 'seed\n' > seed.txt
+    git add -A >/dev/null 2>&1
+    git commit -qm seed
+) >/dev/null 2>&1
+printf 'clean diagnosis content\n' > "$repo/notes/hardware/x-diagnosis.md"
+
+publish_diagnosis "$repo/notes/hardware/x-diagnosis.md" "" >/dev/null 2>&1
+check "no remote configured is reported as failure, not success" "1" "$?"
+
+tracked="$(git -C "$repo" ls-files notes/hardware/ | tr -d '\n')"
+check "the gitignored diagnosis is force-added and committed anyway" \
+    "notes/hardware/x-diagnosis.md" "$tracked"
+
+# Re-running must not create an empty commit.
+before_count="$(git -C "$repo" rev-list --count HEAD)"
+publish_diagnosis "$repo/notes/hardware/x-diagnosis.md" "" >/dev/null 2>&1
+after_count="$(git -C "$repo" rev-list --count HEAD)"
+check "an unchanged diagnosis does not create a second commit" "$before_count" "$after_count"
+
+# Nothing above may have touched the real repository.
+check "the real repository was left alone" "" \
+    "$(git -C "$repo_root" status --porcelain -- notes/hardware/ 2>/dev/null | grep -c 'diagnosis' | sed 's/^0$//')"
+
 echo
 if [[ $failures -eq 0 ]]; then
     printf '\033[32mAll checks passed.\033[0m\n'
