@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Regression tests for the two capture-script hazards found in review round five.
+# Regression tests for the capture-script hazards found in review round five, plus the
+# structural property the diagnosis file depends on.
 #
 #   1. Overwrite protection. A hardware capture is ONE-WAY evidence — after the machine is
 #      reinstalled it cannot be recreated. An earlier version named the output file by date
@@ -112,6 +113,46 @@ check "zero is a valid reading and must not be flagged" \
 check "a partially populated log flags only the absent fields" \
     "available spare|media/data-integrity errors" \
     "$(joined "PASSED" "0x00" "5" "" "")"
+
+# ---------------------------------------------------------------------------
+echo
+echo "== diagnosis file is written by a redirected group, not a pipe =="
+# ---------------------------------------------------------------------------
+# The DIAGNOSIS block appends to the `blocking` array while writing to the diagnosis file.
+# A redirected group keeps those appends; piping the same block to `tee` would run it in a
+# subshell and silently discard every one of them, leaving --strict unable to fail. This
+# guards the structure, because the pipe version looks tidier and would pass every other test.
+arr_redirect=()
+{ echo ignored; arr_redirect+=(x); } > /dev/null
+check "a redirected group preserves array appends" "1" "${#arr_redirect[@]}"
+
+arr_pipe=()
+# shellcheck disable=SC2030,SC2031  # losing the value IS the assertion here
+{ echo ignored; arr_pipe+=(x); } | cat > /dev/null
+# shellcheck disable=SC2031  # reading the LOST value is the assertion
+check "a piped group loses them (this is why the script must not use a pipe)" "0" "${#arr_pipe[@]}"
+
+grp_open=$(grep -c '^{$' "$repo_root/scripts/capture-followup.sh")
+# shellcheck disable=SC2016  # a literal grep pattern; expansion would break it
+grp_close=$(grep -c '^} > "\$diag_file"$' "$repo_root/scripts/capture-followup.sh")
+check "capture-followup.sh opens exactly one such group" "1" "$grp_open"
+check "and closes it with a redirect, not a pipe" "1" "$grp_close"
+
+if grep -qE '^\} \| *tee' "$repo_root/scripts/capture-followup.sh"; then
+    fail "the diagnosis group is piped to tee — --strict would silently stop working"
+else
+    pass "the diagnosis group is not piped to tee"
+fi
+
+# Every blocking+= call must sit inside that group, or it cannot influence --strict.
+open_ln=$(grep -n '^{$' "$repo_root/scripts/capture-followup.sh" | cut -d: -f1)
+# shellcheck disable=SC2016  # a literal grep pattern; expansion would break it
+close_ln=$(grep -n '^} > "\$diag_file"$' "$repo_root/scripts/capture-followup.sh" | cut -d: -f1)
+outside=0
+while IFS=: read -r ln _; do
+    if [[ "$ln" -lt "$open_ln" || "$ln" -gt "$close_ln" ]]; then outside=$((outside + 1)); fi
+done < <(grep -n 'blocking+=' "$repo_root/scripts/capture-followup.sh")
+check "every blocking+= call sits inside the diagnosis group" "0" "$outside"
 
 echo
 if [[ $failures -eq 0 ]]; then

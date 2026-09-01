@@ -11,8 +11,14 @@
 #      original capture did not read the lockdown state, so it stayed an inference.
 #   3. nvme-cli was missing, so there is no NVMe-native controller detail.
 #
-# This script installs the two packages, re-runs the full capture, and prints a short
-# DIAGNOSIS you can paste back — roughly 25 lines instead of a 70 KB attachment.
+# This script installs the two packages, re-runs the full capture, and writes a small
+# DIAGNOSIS file — a few KB rather than the 70 KB raw capture.
+#
+# SHARING THE RESULT. There is no shared clipboard between the Tensorbook and the machine
+# running the design work, so the diagnosis is written to its own file, built to be sent:
+# it carries no serial numbers, MAC addresses or filesystem UUIDs, so it needs no
+# redaction before emailing or committing. Its path is printed in a banner at the end.
+# The RAW capture is a separate, much larger file that is NOT safe to share as-is.
 #
 # It changes the system in exactly one way: installing smartmontools and nvme-cli via apt.
 # Everything else is read-only.
@@ -33,6 +39,7 @@
 #   Other options:
 #     --no-install       diagnose only; install nothing
 #     --skip-dock-test   skip the interactive dock steps
+#     --keep-raw PATH    also copy the raw capture somewhere (a USB stick, say)
 #     --strict           exit non-zero if essential M0 evidence is still missing,
 #                        instead of only printing warnings. For scripted or CI use.
 #                        NOTE: --strict covers MACHINE-READABLE capture evidence only.
@@ -126,11 +133,16 @@ fi
 INSTALL=1
 DOCK_TEST=1
 STRICT=0
+KEEP_RAW=""
+KEEP_RAW_NEXT=0
 for arg in "$@"; do
     case "$arg" in
         --no-install)     INSTALL=0 ;;
         --skip-dock-test) DOCK_TEST=0 ;;
         --strict)         STRICT=1 ;;
+        --keep-raw)       KEEP_RAW_NEXT=1 ;;
+        /*|./*|~*)        if [[ $KEEP_RAW_NEXT -eq 1 ]]; then KEEP_RAW="$arg"; KEEP_RAW_NEXT=0
+                          else echo "unexpected path argument: $arg" >&2; exit 2; fi ;;
         -h|--help)
             sed -n '2,/^set -/p' "${BASH_SOURCE[0]}" | sed '$d; s/^#\{1,\} \{0,1\}//; s/^#$//'
             exit 0 ;;
@@ -193,8 +205,36 @@ fi
 # ---------------------------------------------------------------------------
 # 3. DIAGNOSIS — the part worth pasting back
 # ---------------------------------------------------------------------------
-say "DIAGNOSIS (paste this back)"
+# The whole point of this file is that it can be emailed: small, self-contained, and
+# carrying no serial numbers, MAC addresses, filesystem UUIDs or hostname beyond the
+# machine label already used in the committed profile.
+if [[ -n "${capture_out:-}" ]]; then
+    diag_file="${capture_out%-raw.md}-diagnosis.md"
+else
+    diag_file="$script_dir/../notes/hardware/diagnosis-$(date -u +%Y%m%dT%H%M%SZ).md"
+fi
+mkdir -p "$(dirname "$diag_file")" 2>/dev/null
 
+if [[ -n "$KEEP_RAW" && -n "${capture_out:-}" ]]; then
+    if cp "$capture_out" "$KEEP_RAW" 2>/dev/null; then
+        echo "Raw capture also copied to: $KEEP_RAW"
+    else
+        echo "WARNING: could not copy the raw capture to $KEEP_RAW" >&2
+        warnings+=("--keep-raw copy to $KEEP_RAW failed")
+    fi
+fi
+
+say "DIAGNOSIS"
+{
+echo "# M0 follow-up diagnosis"
+echo
+echo "Generated $(date -u '+%Y-%m-%dT%H:%M:%SZ') by capture-followup.sh"
+echo "Kernel: $(uname -srm 2>/dev/null)"
+echo
+echo "Deliberately free of serial numbers, MAC addresses and filesystem UUIDs, so this"
+echo "file can be emailed or committed without redaction. The full raw capture is a"
+echo "separate, much larger file that is NOT safe to share as-is."
+echo
 echo "--- hibernation / D29 ---"
 sb="$(mokutil --sb-state 2>/dev/null || echo 'unknown')"
 lockdown="$(cat /sys/kernel/security/lockdown 2>/dev/null || echo 'unreadable')"
@@ -390,12 +430,46 @@ else
 fi
 
 echo
-echo "--- NVMe controllers ---"
-if command -v nvme >/dev/null 2>&1; then
-    nvme list 2>/dev/null || echo "nvme list failed"
-else
+echo "--- NVMe namespace format (settles sector geometry) ---"
+if ! command -v nvme >/dev/null 2>&1; then
     echo "nvme-cli unavailable"
+    blocking+=("nvme-cli unavailable — NVMe-native sector geometry unconfirmed")
+else
+    # Deliberately NOT `nvme list`: that prints drive serial numbers, and this block is
+    # meant to be pasteable. The LBA format is what the design actually needs — it says
+    # whether a 4096-byte format exists and which one is in use, which is exactly the
+    # 512n-versus-512e question the profile got wrong once already.
+    mapfile -t nsdrives < <(lsblk -d -n -o NAME,TRAN 2>/dev/null | awk '$2=="nvme"{print "/dev/"$1}')
+    for d in "${nsdrives[@]}"; do
+        printf '%s\n' "$d"
+        nvme id-ns -H "$d" 2>/dev/null | grep -i "LBA Format" | sed 's/^/  /' \
+            || echo "  could not read namespace format"
+    done
+    [[ ${#nsdrives[@]} -eq 0 ]] && echo "  no NVMe namespaces found"
 fi
+
+echo
+echo "--- thermal and fan control (16.5 input) ---"
+# Compact form of what capture-hardware.sh records in full. An empty fan/pwm list is the
+# finding, not a gap: it is the strongest evidence for the reported no-fan-control situation.
+hw_names="$(for f in /sys/class/hwmon/hwmon*/name; do [[ -e "$f" ]] && cat "$f"; done 2>/dev/null | sort -u | tr '\n' ' ')"
+printf 'hwmon chips      : %s\n' "${hw_names:-none}"
+fan_ct=$(find /sys/class/hwmon -name 'fan*_input' 2>/dev/null | wc -l | tr -d ' ')
+pwm_ct=$(find /sys/class/hwmon -name 'pwm[0-9]' 2>/dev/null | wc -l | tr -d ' ')
+cool_ct=$(find /sys/class/thermal -maxdepth 1 -name 'cooling_device*' 2>/dev/null | wc -l | tr -d ' ')
+printf 'fan inputs       : %s\n' "$fan_ct"
+printf 'writable pwm     : %s\n' "$pwm_ct"
+printf 'cooling devices  : %s\n' "$cool_ct"
+if [[ "$fan_ct" == "0" && "$pwm_ct" == "0" ]]; then
+    echo "NOTE            : no fan telemetry or control exposed — this CONFIRMS the reported"
+    echo "                  'no fan control at all' on this chassis, rather than leaving it hearsay."
+fi
+hot="$(for z in /sys/class/thermal/thermal_zone*; do [[ -r "$z/temp" ]] && printf '%s:%s ' "$(cat "$z/type" 2>/dev/null)" "$(cat "$z/temp" 2>/dev/null)"; done 2>/dev/null)"
+printf 'zone temps (m°C) : %s\n' "${hot:-none}"
+printf 'cpufreq driver   : %s\n' "$(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_driver 2>/dev/null || echo none)"
+
+} > "$diag_file"
+cat "$diag_file"
 
 # ---------------------------------------------------------------------------
 say "SUMMARY"
@@ -419,11 +493,25 @@ if [[ ${#blocking[@]} -eq 0 ]]; then
     echo "  - can Secure Boot be disabled?   - BIOS password set?"
 fi
 
-if [[ -n "$capture_out" ]]; then
+echo
+printf '\033[1m===============================================================\033[0m\n'
+printf '\033[1m SEND THIS ONE FILE:\033[0m\n'
+printf '   %s\n' "$diag_file"
+printf '   (%s)\n' "$(du -h "$diag_file" 2>/dev/null | cut -f1 | tr -d ' ') — small enough to attach or paste"
+echo
+echo " It is redaction-safe: no serials, MACs or UUIDs. Email it, or if this"
+echo " machine has the repo checked out and push access, simply:"
+echo
+echo "     git add -f \"$diag_file\" && git commit -m 'M0 follow-up diagnosis' && git push"
+echo
+echo " (-f is needed because notes/hardware/ is gitignored by default, which is"
+echo "  deliberate: the RAW capture must never be committed.)"
+printf '\033[1m===============================================================\033[0m\n'
+
+if [[ -n "${capture_out:-}" ]]; then
     echo
-    echo "Full capture: $capture_out"
-    echo "That file is gitignored and contains serials, MACs, UUIDs and the hostname."
-    echo "Paste back only the DIAGNOSIS block above; keep a copy of the full file off-machine."
+    echo "Full raw capture (do NOT email or commit this one): $capture_out"
+    echo "It contains serials, MACs, UUIDs and the hostname. Keep a copy off-machine."
 fi
 
 # Default is diagnostic: report and exit 0, because a partial answer still has value.
