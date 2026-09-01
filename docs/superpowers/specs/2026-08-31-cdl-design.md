@@ -1,10 +1,15 @@
 # CDL Linux — Product and Architecture Overview
 
-**Status:** Draft for detailed review · **Revision:** 2.1 · **Date:** 2026-08-31 · **Repo:** `ContextLab/cdl-linux`
+**Status:** **Frozen for implementation** · **Revision:** 2.2 · **Date:** 2026-08-31 · **Repo:** `ContextLab/cdl-linux`
 
 A focused coordination appliance for supervising concurrent LLM agent work, delivered as an
 installable Linux distribution.
 
+> **This document is frozen.** It has converged, and it should stop being the project's centre of
+> gravity. Amend it only when a spike, a hardware capture, or a component spec produces genuinely new
+> evidence — not to refine wording. The next real progress comes from M0's hardware facts,
+> `cdl-agent-lifecycle`, and spikes 1 and 2.
+>
 > **What this document is.** The product thesis, scope boundary, decision record, threat model,
 > milestone plan, and requirement traceability matrix.
 >
@@ -26,6 +31,16 @@ installable Linux distribution.
 > six agent-specific threats (§5); named the sshd startup design as a sub-problem (§7); fixed the M0
 > committed-versus-gitignored contradiction (§6); added M3's restore boundary (§6); and tightened
 > eight acceptance tests that did not fully test their requirements (§10).
+>
+> **Revision 2.2 changes** (final consistency patch): made compositor language consistent with D34
+> and rewrote §12 around required session *properties* rather than a chosen implementation, with cage
+> as the documented rejected baseline; made the hardware-capture ignore rule fail-closed so the
+> committed profile is possible and raw captures are not; removed hibernation from R8's M2 test and
+> split it into R8b at M3; gave D29 an explicit failure branch (§3.2); resolved cloud and HF Jobs to
+> "optional extension, never blocks a release"; gave thermal policy its real owner (§16.5); stated
+> that the registry is local and authoritative rather than distributed (§8); added M1's architecture
+> requirement (§6); and corrected the `/etc` credentials rationale plus five acceptance tests (§5,
+> §10).
 
 ---
 
@@ -141,7 +156,7 @@ the table says otherwise is scope creep to be pushed back.
 | Worktree seeding and agent supervision | ✓ | ✓ |
 | Job layer, all seven verbs | ✓ | ✓ |
 | Job backends: **local + ssh+nohup** | ✓ **required** | ✓ |
-| Job backends: cloud, HF Jobs | — optional adapters | ✓ before M4, each gated on §16.4 |
+| Job backends: cloud, HF Jobs | — | — **optional extension; never blocks M4 or product v1** (§16.4) |
 | Job backend: Slurm | — | designed, ships disabled (§16.1) |
 | Spend controls, best-effort (D33) | ✓ | ✓ |
 | Provider configuration + `cdl doctor` | ✓ | ✓ |
@@ -204,7 +219,7 @@ review on 2026-08-31. All were confirmed by the user.
 | **D27** | **Backup target is the user's QNAP/TrueNAS**, which exposes SSH and can run containers. Primary design: `restic` → `rest-server --append-only` in a container on the NAS. Fallbacks in priority order: restic over SFTP; restic via an rclone SMB remote. A capability probe resolves which, before any code. |
 | **D28** | **Working shape: 5–10 API agents + 1–2 local agents + 2–4 GPU-host agents.** See §2.1. |
 | **D29** | **Hibernation is a launch requirement**, not an experiment. It must be validated on the real machine, including recovery from a failed resume, before M3 is complete. |
-| **D30** | **Full job layer** — the complete verb set (submit / list / status / logs / cancel / artifacts / reconcile). **Required backends are local and ssh+nohup**; those two alone gate the alpha. Cloud and HF Jobs are **optional adapters** that must land before M4, and neither may be written until its provider is named and its funding confirmed (§16.4). Slurm is designed and specified but ships disabled until its auth is testable (§16.1). |
+| **D30** | **Full job layer** — the complete verb set (submit / list / status / logs / cancel / artifacts / reconcile). **Required backends are local and ssh+nohup**; those two alone gate the alpha. Cloud and HF Jobs are **optional extensions**: they never block M4 or product v1, and neither may be written until its provider is named and its funding confirmed (§16.4). Local plus ssh already satisfy the remote-coordination thesis; a cloud adapter must not hold up an installable operating system. Slurm is designed and specified but ships disabled until its auth is testable (§16.1). |
 | **D31** | **Acceptance is a fresh install onto a fully wiped machine.** Nothing hand-configured on the working machine counts as done until it exists as a package or declarative artifact in the repo. |
 | **D32** | **Three release tiers** — usable alpha (M1–M2), release candidate (M3–M4), product v1. A capability blocks only the milestone its tier assigns it (§2.2). |
 | **D33** | **Spend controls are owned by `cdl-agent-lifecycle`**, best-effort but not unowned. Minimum: per-job declared budget, per-provider concurrency ceiling, global daily warning and hard-stop where the API permits, runtime and token accounting, cost visible in `cdl status`, and defined behaviour when a provider exposes no reliable cost data. |
@@ -224,6 +239,28 @@ review on 2026-08-31. All were confirmed by the user.
 - **tmux.** See §8.
 - **swaylock under cage.** Ruled out on primary-source evidence; see §12.
 
+### 3.2 D29's failure branch
+
+D29 makes hibernation a launch requirement on a chassis with documented, severe suspend and
+hibernate defects. A launch requirement with no failure branch is how a project accumulates
+increasingly desperate kernel workarounds: each one is individually justified because failing is not
+permitted. **"A failed spike may change the architecture" applies here too.**
+
+If ten consecutive hardware hibernate/resume cycles cannot be made to pass in M3, the project takes
+one of these branches — explicitly, as a recorded decision, not by drift:
+
+1. **Block the release** pending a kernel or firmware fix, and say so publicly rather than shipping a
+   feature that works intermittently.
+2. **Change the target hardware.** The design is meant to be hardware-profile-driven (D1); a machine
+   that cannot hibernate reliably may simply be the wrong first target.
+3. **Reconsider D29.** The user downgrades hibernation to an experiment, R8's orderly-shutdown
+   behaviour (R8b) becomes the shipped behaviour, and the swap sizing stays as-is so the decision
+   can be revisited without a reinstall.
+
+**Branch 3 is the only one that does not require restarting work**, which is why R8 is written so
+that its M2 behaviour is independently shippable. What is *not* permitted is a fourth branch where
+hibernation is nominally required, never actually passes, and the workarounds accumulate.
+
 ---
 
 ## 4. Hard constraints
@@ -233,7 +270,7 @@ Requirements that **cannot be satisfied as originally stated**. Each is stated w
 | Requirement | Why impossible | Resolution |
 |-|-|-|
 | Create USB images "via web" | WebUSB classes Mass Storage as a protected interface and rejects `claimInterface()`; the only bypass requires Isolated Web Apps on enterprise-managed ChromeOS. The OS kernel driver already claims the interface. No product does this. | Ventoy stick prepared once natively; thereafter each release is a browser drag-and-drop onto its data partition. Plus documented `dd`/Rufus paths. |
-| Fira Code ligatures on the bare Linux console | The kernel console has no TrueType rasterizer (PSF 1-bit bitmaps only), no text-shaping engine, and a 512-glyph ceiling. A ligature is a HarfBuzz GSUB substitution. This is a different rendering model, not a missing feature. | Single fullscreen kitty under `cage`. See §12. |
+| Fira Code ligatures on the bare Linux console | The kernel console has no TrueType rasterizer (PSF 1-bit bitmaps only), no text-shaping engine, and a 512-glyph ceiling. A ligature is a HarfBuzz GSUB substitution. This is a different rendering model, not a missing feature. | Single fullscreen kitty under a Wayland compositor. See §12. |
 | Cmd keybindings + system clipboard on the bare console | `keymaps(5)` documents nine console modifiers, none of which is Super. `console_codes(4)` supports two OSC sequences; OSC 52 is not among them. | Real terminal emulator. See §8. |
 | Ship LM Studio or Claude Code on the ISO | LM Studio's terms forbid sublicensing, distributing or transferring the software. Claude Code's license grants no sublicense. | Fetch-on-demand helpers running each vendor's own installer, so the user accepts the license directly and we redistribute nothing. |
 | Bake the CUDA **toolkit** into the ISO | The CUDA EULA permits redistribution only for applications with "material additional functionality"; an OS does not qualify. Ubuntu places it in multiverse. | Ship the NVIDIA **driver** (explicitly redistributable for OSI-licensed kernels); pull CUDA at first boot. PyTorch wheels bundle their own CUDA runtime anyway. |
@@ -254,7 +291,7 @@ Full controls and their failure behaviour live in `cdl-security-and-recovery`.
 |-|-|-|-|-|
 | T1 | Opportunistic theft, machine powered off | Yes | LUKS2 FDE, passphrase at every boot (D7). Swap inside the container, so RAM contents including API keys never hit plaintext disk. | **Low, conditional on a strong passphrase.** Residual: passphrase strength and reuse; offline guessing against the LUKS header; metadata exposed through the unencrypted ESP and `/boot`; boot tampering if the machine is later recovered and reused; and any credential copied *outside* the encrypted volume — backups, paper notes, the user's Mac. Revision 2 said "none material", which was wrong. |
 | T2 | Opportunistic access, machine powered on and unattended | Yes | **Currently unresolved.** Autologin plus plaintext keys means opening the lid yields a shell with live credentials; FDE protects only a powered-off machine. | **The live gap in the design.** See §12; blocks the autologin decision. |
-| T3 | Malicious local process reading provider keys | Yes | Keys in `~/.config/cdl/providers.env`, mode `0600` — **not** `/etc`, which the `ollama` system user and every service unit could read. | Any process running *as the user* can still read them. Accepted: this is a single-user machine. |
+| T3 | Malicious local process reading provider keys | Yes | Keys in `~/.config/cdl/providers.env`, mode `0600`, owned by the user. | Any process running *as the user* can still read them. Accepted: this is a single-user machine. |
 | T4 | Compromised or misbehaving agent destroying local work | Yes | Bubblewrap process sandbox with an AppArmor profile; `Restart=no`; append-only backup so history cannot be rewritten. **Worktrees are *not* part of this control** — see below. | Sandbox escape; anything the agent is legitimately allowed to reach. |
 | T4a | Agent exfiltrates secrets over permitted network egress | Yes | **No control in v1 as designed.** The sandbox's network policy is the only possible boundary and is currently unspecified. | **Open.** `cdl-agent-lifecycle` must define an egress policy, or this is accepted explicitly rather than by omission. |
 | T4b | Untrusted repository content as instructions (prompt injection) | Yes | None mechanical. An agent reads the repo it works on, and that content reaches the model. | **Open.** Mitigation is procedural: treat any repo an agent touches as trusted input, and say so. |
@@ -277,6 +314,13 @@ error and is corrected above.
 **The T4a–T4f rows are mostly open.** That is deliberate: an agent threat model with honest gaps is more
 useful than one that lists a control for every row. Each open row is an input to
 `cdl-agent-lifecycle` and `cdl-security-and-recovery`, and none may be closed by assertion.
+
+**On why credentials are user-scoped rather than in `/etc`.** Revision 1 claimed `/etc` would let
+"the `ollama` system user and every service on the box" read the keys. That is wrong: a `0600`
+root-owned file in `/etc` is no more readable than one in `$HOME`. The real reasons are that
+user-scoped credentials match the single-user threat model, keep the keys inside the backup and
+restore path that already covers `$HOME`, and avoid the accident that system-wide configuration
+invites — services picking up credentials nobody intended to hand them.
 
 **Note on T2 and D26 together.** Declining remote unlock removes an attack surface (no tailnet
 credential on unencrypted `/boot`) at the cost of availability after an unattended reboot. That
@@ -309,7 +353,14 @@ principle is why ISO work is last, not first.
 ### M1 · Environment prototype — *does the day-to-day feel good?*
 
 - **Entry:** M0 complete (for the wifi/GPU package choices only; otherwise independent).
-- **Where:** an Ubuntu 26.04 VM on the Mac, or any existing Linux box. **Not** the Tensorbook.
+- **Where:** an Ubuntu 26.04 VM, or any existing Linux box. **Not** the Tensorbook.
+- **Architecture matters.** The target and the vendored binaries (zellij, croft) are **amd64**; a VM
+  on Apple Silicon is ARM. Either run an amd64 VM, or run ARM for interaction testing *and* validate
+  package closure and vendored binaries on amd64 in CI. Interaction work on ARM is fine; concluding
+  anything about packages or binaries from it is not.
+- **The compositor spike needs a real seat.** Spike 1 tests a Wayland seat and a session-lock
+  protocol, which nested windows inside someone else's desktop session cannot exercise. It needs a
+  virtual GPU/DRM environment or bare metal.
 - **Deliverable:** package manifest, kitty session, generated keybindings, provider configuration,
   worktree creation and seeding, one supervised agent under systemd, `cdl status`.
 - **Exit:** the user works inside it for a full session and reports whether it is pleasant. Spikes 1
@@ -416,7 +467,7 @@ must reconcile against it before it is called complete.
 |-|-|
 | §1 Purpose and design philosophy | §1, sharpened thesis added |
 | §2 Decision record | §3, extended with D26–D31 |
-| §3 Hard constraints | §4, plus one new row (the cage locking constraint) |
+| §3 Hard constraints | §4, plus one new row (the compositor locking constraint) |
 | §4 Storage and boot | §11 keeps the layout and rationale; the install recipe → `cdl-install-and-packaging` |
 | §5 Session and display | §12, with three corrections |
 | §6 Keybindings | §8 keeps the rule and the tmux/zellij verdict; config generation → `cdl-agent-lifecycle` |
@@ -437,7 +488,7 @@ must reconcile against it before it is called complete.
 
 ```
                        ┌───────────────────────────────────────────┐
-   attention surface   │  cage → kitty → zellij → cdl status       │   one visible thing
+   attention surface   │  compositor → kitty → zellij → cdl status │   one visible thing
                        └───────────────────────────────────────────┘
                                         │
                        ┌───────────────────────────────────────────┐
@@ -451,8 +502,9 @@ must reconcile against it before it is called complete.
                           └────────────────┴─────────────────┘
                                         │
                        ┌───────────────────────────────────────────┐
-   durable state       │  job + agent registry (SQLite, WAL)       │   spans three machines
-                       │  port allocation registry (locked)        │
+   durable state       │  job + agent registry (SQLite, WAL)       │   local authoritative registry,
+                       │  port allocation registry (locked)        │   tracking execution across
+                       │                                           │   three locations
                        └───────────────────────────────────────────┘
                                         │
                        ┌───────────────────────────────────────────┐
@@ -467,10 +519,17 @@ must reconcile against it before it is called complete.
                        └───────────────────────────────────────────┘
 ```
 
-**Why the registry is SQLite, not per-worktree JSON.** D28 puts agents on three machines and D30
-requires reconciliation across them. Per-worktree JSON with multiple concurrent writers would
-require inventing transactional file handling; SQLite in WAL mode provides it. This reverses
-revision 1's implied design.
+**Why the registry is SQLite, not per-worktree JSON.** D28 puts agents in three *locations* and D30
+requires reconciliation across them. Per-worktree JSON with multiple concurrent writers on one
+machine would require inventing transactional file handling; SQLite in WAL mode provides it. This
+reverses revision 1's implied design.
+
+**The registry is local and authoritative — it is not a distributed database.** It runs on the
+Tensorbook and records work executing elsewhere; remote hosts hold no replica and are never written
+to directly. `cdl-agent-lifecycle` must therefore state explicitly that **the WAL database must never
+live on NFS or SMB** (where WAL locking is unreliable), and must define its backup treatment, schema
+migration, corruption recovery, and — the case restore actually creates — **reconciliation of
+restored-but-stale records whose remote process no longer exists.**
 
 **Worktree per agent, enforced.** *Reported by research subagent, not independently reproduced:*
 agents sharing one checkout landed 24 of 100 commits with 75 `index.lock` failures, staging each
@@ -493,7 +552,7 @@ is generated from it: `keyd`, kitty, `~/.inputrc`, zsh bindkeys, helix, neovim, 
 Emacs via the `kkp` package. **The Cmd layer must never inherit Control** — aliasing Cmd onto Ctrl
 is destructive in a terminal: Cmd-S becomes XOFF (looks like a hang), Cmd-Z becomes SIGTSTP, Cmd-C
 becomes SIGINT. Both keymap systems must be configured — the console uses `loadkeys`/PSF,
-cage/Wayland uses XKB — or the rescue console behaves differently from the session.
+the Wayland session uses XKB — or the rescue console behaves differently from the session.
 
 **zellij, not tmux.** tmux's manual contains zero occurrences of "super", and tmux strips the kitty
 keyboard protocol, so Cmd bindings break in every application running inside it. zellij adopted that
@@ -526,11 +585,13 @@ that is what they are for. Each has a stated pass condition.
 
 ### Spike 1 · Session and lock path
 
-Assemble cage + kitty + literal Super keybindings + zellij + croft, and determine the lock path.
+**Start from minimal sway** (D34's default hypothesis) — authenticated tty login → sway → kitty →
+zellij → swaylock — with croft and literal Super keybindings in place, and cage compared only as the
+rejected baseline.
 
-The swaylock sub-question is **already answered and needs no spike**: cage implements neither
-`ext-session-lock-v1` nor layer-shell (§4). What the spike must decide is which of three designs to
-adopt:
+The swaylock-under-cage sub-question is **already answered and needs no spike**: cage implements
+neither `ext-session-lock-v1` nor layer-shell (§4). What the spike must decide is which of three
+designs to adopt:
 
 | Option | Mechanism | Verdict |
 |-|-|-|
@@ -574,22 +635,23 @@ it, and the test that proves it. Rows marked ⚠ are those revision 1 dropped or
 
 | # | Requirement | Design component | Milestone | Acceptance test |
 |-|-|-|-|-|
-| R1 | Provider APIs built in; keys collected at setup | first-boot-and-environment §providers | M1 | `cdl doctor` makes one live call per configured provider and reports which keys work |
+| R1 | Provider APIs built in; keys collected at setup | first-boot-and-environment §providers | M1 | `cdl doctor` makes **one minimal, bounded-cost** live call per configured provider — smallest model, fewest tokens, documented worst-case spend — and reports which keys work. **Keys must be redacted in all output and logs**, including on failure paths, where they most often leak |
 | R2 | Two drives as one ~2 TB volume | install-and-packaging §storage | M3 | `lsblk` shows the four-layer stack; `df` shows a single ~1.85 TiB filesystem |
 | R3 ⚠ | emacs + croft preinstalled | first-boot-and-environment §editors | M1 | Both launch; croft renders Nerd Font glyphs not `[?]`; **Emacs LLM integration (gptel/ellama) configured and answering** |
 | R4 | macOS-native keybindings | agent-lifecycle §keybindings (generation); overview §8 | M1 | Generated configs diffed against the source table in CI; Cmd-S/Z/C verified not to emit XOFF/SIGTSTP/SIGINT |
-| R5 | Everything a TUI; no GUI | overview §12; install §manifest | M1 | Manifest contains no display manager, no browser engine, no notification daemon — **and the same assertion holds over the installed package closure, since dependencies can pull in what the manifest excludes** |
+| R5 | Everything a TUI; no GUI | overview §12; install §manifest | M1 | No display manager, no notification daemon, and no **browser application** — defined as an installed executable capable of rendering and navigating the web with a JavaScript engine. Asserted over the **installed package closure**, not just the manifest, since dependencies pull in what the manifest excludes. A rendering *library* (WebKit as someone's dependency) does not violate this; a launchable browser does. State the rule this way or the test is unfalsifiable |
 | R6 | Native CUDA/NVIDIA | first-boot-and-environment §cuda | M2 | `nvidia-smi` and a PyTorch CUDA tensor op on the real GPU |
 | R7 ⚠ | ollama + LM Studio; models chosen at install; easy to add later | first-boot-and-environment §models | M2 | Model picker gated on measured VRAM; disk quota and GC policy enforced — a pull that would exceed the ceiling is refused; **and the LM Studio fetch-on-demand helper runs the vendor installer so the user accepts the license directly, verified end to end (§4)** |
-| R8 ⚠ | Wifi drivers + modern conveniences | first-boot-and-environment §network, §power | M2 | Wifi connects via nmtui; **lid-close during a running agent does not suspend; critical battery hibernates rather than powering off** |
-| R9 | LAN backup | security-and-recovery §backup | M2 | A restore drill onto a clean machine reproduces **work, system configuration, repository keys, SSH identity, restic credentials and registry state** — not merely `$HOME`. Secrets may be re-enrolled rather than restored, but the procedure must be exercised (§6, M3 restore boundary) |
+| R8 ⚠ | Wifi drivers + modern conveniences | first-boot-and-environment §network, §power | M2 | Wifi connects via nmtui; lid-close during a running agent does not suspend; **critical battery warns early, refuses to start new long jobs below a threshold, and performs an orderly shutdown**. Hibernation is deliberately *not* part of this test — see R8b |
+| R8b | Critical battery hibernates rather than shutting down | first-boot-and-environment §power | **M3** | Critical battery hibernates and resumes with work intact. Replaces R8's orderly shutdown once D29 is validated; if D29 fails (§3.2), the M2 behaviour stands as the shipped behaviour |
+| R9 | LAN backup | security-and-recovery §backup | M2 | A restore drill onto a clean machine **re-establishes** work, system configuration, repository keys, SSH identity, restic credentials and registry state — not merely `$HOME`. Secrets are deliberately **re-enrolled rather than restored** (§6, M3 restore boundary), so the drill exercises enrollment. It must also **reconcile restored job records whose remote process no longer exists** — the state a restore reliably produces |
 | R10 ⚠ | Full apt support | install-and-packaging §apt-policy | M2 | Ownership policy documented per package class; third-party pins in `/etc/apt/preferences.d`; `unattended-upgrades` posture decided and tested |
 | R11 | python + PyTorch + HF for CUDA | first-boot-and-environment §python | M2 | CUDA tensor op; HF cache location and ceiling configured |
 | R12 ⚠ | LaTeX distribution | first-boot-and-environment §latex | M2 | A document builds; **profile and installed size explicitly chosen against the ISO budget** |
 | R13 ⚠ | Full docs with screenshots | install-and-packaging §documentation | M4 | VHS PNG diffs pass in CI; docs present on-disk offline; **boot/installer/GRUB captures produced by QEMU framebuffer, not VHS** |
 | R14 ⚠ | Text-based browser | first-boot-and-environment §browser | M1 | w3m or lynx installed. **Must be non-JS by capability — Browsh and Carbonyl are excluded; Carbonyl is Chromium in a terminal, with WebGL and video** |
 | R15 ⚠ | VPN support | first-boot-and-environment §vpn | M2 | GlobalProtect connects headlessly and survives a multi-hour unattended run, **or** an off-VPN bastion path is documented instead |
-| R16 | Easy installable-USB creation | install-and-packaging §distribution | M4 | **A physical machine boots the ISO from a Ventoy stick** — compatibility assumed until demonstrated. Plus `dd` and Rufus paths documented and tested |
+| R16 | Easy installable-USB creation | install-and-packaging §distribution | M4 | **A physical machine boots the ISO from a Ventoy stick, with Secure Boot in the same state intended for the Tensorbook** — a boot test under a different posture proves nothing about the real one. Compatibility assumed until demonstrated. Plus `dd` and Rufus paths documented and tested |
 | R17 | Fira Code with ligatures | overview §12 | M1 | Ligatures render in kitty; icon glyphs come from the fallback, not a patched font |
 | DR1 | Several agents concurrently (D8/D28) | agent-lifecycle | M2 | The full D28 working shape runs overnight unattended |
 | DR2 | Long-lived unattended sessions (D9) | agent-lifecycle §supervision | M2 | Agent survives logout, **termination and restart of kitty/zellij** (not a machine reboot — D26 means a reboot needs the passphrase), and network loss |
@@ -647,43 +709,58 @@ both drives are NVMe. See §15.
 
 ## 12. Session and display
 
-Boot → **login on tty1** → `cage` → one fullscreen **kitty** → **zellij** for multiplexing. A rescue
-getty on tty2, so a broken GPU driver never leaves the machine unreachable.
+**Stated as required properties, not as a chosen implementation.** D34 names minimal sway as the
+default hypothesis, but spike 1 has not run. Until it does, this section says what the session must
+do; §9 says how the candidate is chosen.
 
-> **Autologin is not committed.** Revision 1 specified autologin. Combined with plaintext API keys
-> that means opening the lid yields a shell with live credentials (threat T2), and the locker
-> revision 1 proposed does not work (below). Autologin is adopted only if spike 1 produces a working
-> lock path; otherwise the session begins with a conventional authenticated login.
+### 12.1 Required session properties
 
-**This is not a desktop.** No window manager, no panel, no file manager, no mouse-driven
-applications. Upstream cage states it "will not fit into a regular desktop-style workflow" — that is
-precisely why it is used.
+| # | Property | Why |
+|-|-|-|
+| P1 | One visible full-screen terminal; no panel, launcher, decorations, desktop services or mouse-driven applications | Principle 1: singularity in attention. The session is a boundary, not a desktop |
+| P2 | GPU-accelerated terminal with truecolor and Nerd Font glyphs | croft's own README requires "A Nerd Font as your terminal font — without one they render as `[?]` boxes" and "A 256 color or truecolor terminal." The bare console satisfies neither, so the flagship editor would be visibly broken on the purist option. This is evidence, not aesthetics |
+| P3 | Programming ligatures | R17, and unachievable on the kernel console (§4) |
+| P4 | **A working lock path that leaves no credentialed shell exposed** | Threat T2. This is the property that eliminated the previous candidate |
+| P5 | Literal Super/Cmd keybindings delivered to applications | R4, and the reason zellij replaces tmux (§8) |
+| P6 | A rescue path independent of the compositor | A broken GPU driver must never leave the machine unreachable — a getty on tty2 |
+| P7 | Defined behaviour when the locker or compositor crashes | An unattended machine must fail closed, not into a live shell |
 
-> **Correction to revision 1.** Revision 1 said cage "cannot display two windows." Its man page says
-> the opposite, verbatim: *"Cage runs a single, maximized application. Cage can run multiple
-> applications, but only a single one is visible at any point in time."* The constraint is one
-> **visible** client, not one client. The distinction matters for any future in-session overlay.
+### 12.2 Session path
 
-**The locking problem.** Revision 1 proposed swaylock under cage. **Cage implements neither
+Boot → **authenticated login on tty1** → candidate compositor → one fullscreen **kitty** → **zellij**
+for multiplexing. Rescue getty on tty2.
+
+> **Autologin is not committed.** Revision 1 specified it. Combined with plaintext API keys, opening
+> the lid would yield a shell with live credentials (T2). Autologin is adopted only if spike 1
+> produces a lock path that passes, and per §9 option C ("no autologin") is a component of the answer
+> rather than the whole of it.
+
+### 12.3 Why cage is the rejected baseline
+
+Revision 1 selected cage and proposed swaylock under it. **Cage implements neither
 `ext-session-lock-v1` nor layer-shell** — verified against the source tree (no `session_lock.c`; no
 matches for `session_lock`/`layer_shell` in the 716-line `cage.c`) and confirmed by open upstream
-issue **#264, "Add support for ext-session-lock-v1."** `physlock` is not an equivalent substitute:
-it draws its prompt on the VT, which cage occupies as DRM master, so the prompt would not be
-visible. *That last step is reasoning from the display model, not a test — confirm it in spike 1
-rather than treating it as established.* Three candidate
-designs are in spike 1 (§9).
+issue **#264, "Add support for ext-session-lock-v1."** It therefore fails P4, which is disqualifying.
 
-**Justification for a compositor at all** is evidentiary rather than aesthetic: croft, a required
-component, states in its own README that it needs "A Nerd Font as your terminal font — without one
-they render as `[?]` boxes" and "A 256 color or truecolor terminal." The bare console satisfies
-neither. The distro's flagship editor would be visibly broken on the purist option.
+`physlock` is not an equivalent substitute: it draws its prompt on the VT, which the compositor
+occupies as DRM master, so the prompt would not be visible. *That step is reasoning from the display
+model rather than a test — confirm it in spike 1 rather than treating it as established.*
+
+Two cage facts are worth keeping on record because revision 1 stated them wrongly: its man page says
+*"Cage runs a single, maximized application. Cage can run multiple applications, but only a single
+one is visible at any point in time"* — the constraint is one **visible** client, not one client; and
+upstream describes it as not fitting "into a regular desktop-style workflow", which is a virtue for
+P1 and irrelevant to P4.
+
+### 12.4 Independent of the compositor choice
 
 **Fonts.** `fonts-firacode` **unpatched** plus `fonts-nerd-symbols` as a fontconfig fallback — not a
 Nerd-patched Fira Code. Patching frequently damages GSUB ligature tables; fallback preserves Fira
-Code's ligatures *and* supplies the icon glyphs croft needs.
+Code's ligatures *and* supplies the icon glyphs croft needs (P2, P3).
 
 **Console legibility.** On a 2560×1440 15" panel the default VT font is unreadable. An explicit large
-PSF (`setfont`) and a chosen kitty `font_size` are required, not optional.
+PSF (`setfont`) and a chosen kitty `font_size` are required, not optional (P6 — the rescue console
+has to be usable).
 
 ---
 
@@ -738,7 +815,7 @@ splash, borders, inactive chrome. Their darkness is the point.
 | Stage | Validates | Needs target hardware |
 |-|-|-|
 | **1 · Docker** | Package availability and versions, LLM tooling, python/uv/torch paths, provider config, `cdl doctor`, docs build | No |
-| **2 · QEMU + OVMF, two emulated NVMe controllers** | Storage layout, boot, installer, LUKS+RAID0+LVM+btrfs, **the hibernation storage plumbing and initramfs configuration**, systemd units, cage+kitty session | No |
+| **2 · QEMU + OVMF, two emulated NVMe controllers** | Storage layout, boot, installer, LUKS+RAID0+LVM+btrfs, **the hibernation storage plumbing and initramfs configuration**, systemd units, candidate compositor + kitty session | No |
 | **3 · Tensorbook** | CUDA on real silicon, display on the real panel, wifi, suspend, thermals, **hibernation in fact** | Yes |
 
 Docker validates the *least* risky part of the system: it cannot test a kernel, GPU, console,
@@ -850,17 +927,31 @@ Before either adapter is written, decide and record:
 - What "artifacts" means for each backend concretely — a path, an object URL, a retention window
 - Which job states are common to all backends and which are backend-specific
 - Cost limits and what cancellation actually guarantees per backend
-- **Whether an unavailable backend may leave the release incomplete, or whether the release simply
-  ships without it**
+**Resolved, so it stops being ambiguous:** an unavailable backend **never** blocks a release. Cloud
+and HF Jobs are optional extensions that ship when they are ready, before or after v1. The tier table
+(§2.2) and D30 both now say this in the same words.
 
 The check that settles the HF half is a single minimal job submission, which costs money and
 therefore needs the user's consent rather than being run speculatively.
 
 ### 16.5 Sustained thermal load
 
-A verified first-hand report on this chassis says "I have not been
-able to do any fan control at all." If multi-hour local GPU load is a real use case — D28 says
-1–2 local agents, so it is — thermals are a first-class risk with no current owner.
+A verified first-hand report on this chassis says "I have not been able to do any fan control at
+all." D28 puts 1–2 local agents on the laptop GPU, so multi-hour local load is a real use case and
+thermals are a first-class risk.
+
+**This is an open question, not an unowned one.** Revision 2.1 said unowned, which contradicted §7 —
+`cdl-first-boot-and-environment` already owns power, lid, battery and thermal policy. The work splits:
+
+- **M0** records the GPU's thermal and power limits, and the fan control interfaces the machine
+  actually exposes.
+- **M2** runs a controlled sustained-load test and records the steady-state thermal behaviour.
+- **`cdl-first-boot-and-environment`** owns the resulting policy: throttling, temperature thresholds,
+  whether sustained local inference requires AC power, and **refusal to launch local jobs when
+  conditions are unsafe** — which makes it an input to GPU admission control in
+  `cdl-agent-lifecycle`.
+
+What remains genuinely open is only the measurement, which M0 and M2 supply.
 
 ---
 
@@ -917,3 +1008,17 @@ depending on it:
 | 13 | Spend controls unowned (r2 §16.3) | Owned by `cdl-agent-lifecycle`, tested as DR12. D33 |
 | 14 | M0 output "committed to `notes/hardware/`" (r2 §6) | Contradicted §15, which gitignores it. Raw stays local; a redacted profile is committed. §6, §15 |
 | 15 | §15 duplicated the script's command list (r2 §15) | The two drifted immediately. §15 now states facts required; the script is authoritative for commands |
+
+**Corrections made in revision 2.2**
+
+| # | Revision 2.1 said | Correction |
+|-|-|-|
+| 16 | D34 prefers sway, while five normative sections still prescribed cage | The clearest internal contradiction in the document. §12 now states required session properties; cage is the documented rejected baseline. §4, §8, §9, §12, §14 |
+| 17 | M0 commits `notes/hardware/tensorbook-profile.md` | `.gitignore` made that impossible. Now fail-closed with explicit allows |
+| 18 | R8's M2 test required critical battery to hibernate | That made hibernation alpha-blocking, contradicting the tier table. Split into R8 (orderly shutdown, M2) and R8b (hibernation, M3) |
+| 19 | D29 is a launch requirement, with no failure branch | A requirement that may not fail accumulates workarounds. Three explicit branches recorded. §3.2 |
+| 20 | Cloud and HF Jobs "optional… before M4", with §16.4 still asking if they block the release | Ambiguous. Resolved: optional extensions that never block M4 or product v1 |
+| 21 | Thermals have "no current owner" (r2.1 §16.5) | Contradicted §7. `cdl-first-boot-and-environment` owns the policy; M0 and M2 supply the measurement |
+| 22 | The registry "spans three machines" | Implies distributed SQLite. It is a local authoritative registry tracking execution across three locations. §8 |
+| 23 | `/etc` "would let the `ollama` system user and every service read" the keys | False — mode and ownership apply in `/etc` too. The real rationale is the single-user threat model and the backup path. §5 |
+| 24 | M1 runs in "a VM on the Mac" | On Apple Silicon that is ARM, while the target and vendored binaries are amd64. Architecture requirement stated. §6 |

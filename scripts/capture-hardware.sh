@@ -20,7 +20,9 @@ OUT="${1:-}"
 if [[ -z "$OUT" ]]; then
     repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
     mkdir -p "$repo_root/notes/hardware"
-    OUT="$repo_root/notes/hardware/$(hostname -s 2>/dev/null || echo unknown)-$(date +%Y-%m-%d).md"
+    # The "-raw" suffix is load-bearing: it matches the ignore pattern in
+    # .gitignore, so a raw capture cannot be committed by accident.
+    OUT="$repo_root/notes/hardware/$(hostname -s 2>/dev/null || echo unknown)-$(date +%Y-%m-%d)-raw.md"
 fi
 
 missing=()

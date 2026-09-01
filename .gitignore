@@ -7,7 +7,15 @@ notes/research/*-raw.json
 # Scratch
 *.bak-*
 
-# Hardware captures — contain serial numbers, MAC addresses, filesystem UUIDs
-# and hostnames. Local-only; redact before quoting any of it into a spec.
+# Hardware captures. Raw output contains serial numbers, MAC addresses,
+# filesystem UUIDs and hostnames.
+#
+# Deliberately fail-closed: everything here is ignored and the two intended
+# committed artifacts are named explicitly. A pattern-match approach (ignoring
+# *-raw.md and friends) fails OPEN — a capture saved under an unanticipated
+# name would be silently committable, which is the wrong failure direction for
+# a privacy rule. Adding a third committed artifact means adding a line here,
+# and that is the point.
 notes/hardware/*
 !notes/hardware/README.md
+!notes/hardware/tensorbook-profile.md
