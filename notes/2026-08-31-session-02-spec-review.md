@@ -45,9 +45,30 @@ the **notes heading** is stale, not the spec. Line 453 says "AUTH RESOLVED"; lin
 same file, says "still blocked, diagnosed" — server-side rejection of an offered key. What was
 resolved is password auth removing Kerberos/GSSAPI from v1. Added a supersession marker at line 455.
 
+## Review rounds 2 and 3 (same session)
+
+Two further review rounds produced revision 2.1 (`3952312`) and revision 2.2 (`15b24ca`).
+**The overview is now frozen** — amend only on new evidence from a spike, a hardware capture, or a
+component spec, not to refine wording.
+
+Decisions added: D32 release tiers (alpha M1–M2 / RC M3–M4 / product v1), D33 spend controls owned by
+`cdl-agent-lifecycle`, D34 a compositor with a real session-lock protocol (minimal sway) as the T2
+default. §3.2 records D29's failure branch, which matters: a launch requirement with no permitted
+failure is how kernel workarounds accumulate.
+
+Corrections worth remembering because they were inherited errors, not typos:
+- **HF Jobs entitlement ≠ funding.** The `academia` plan and `jobs` scope were cited as proof of
+  availability; research separately measured **402 Payment Required** on manual runs.
+- **Worktrees are collision isolation, not a security boundary.** They were listed as a control
+  against a malicious agent. The boundary is bubblewrap plus network policy.
+- **`/etc` does not make a file world-readable.** Mode and ownership apply there too. The real
+  rationale for user-scoped credentials is the single-user threat model and the backup path.
+- **The hardware ignore rule was fail-open**, and M0's required committed profile was impossible.
+  Now default-deny with explicit allows.
+
 ## State of the work
 
-- ✅ Revision 2 design spec — **awaiting user's detailed review**
+- ✅ Design spec at **revision 2.2, frozen**
 - ✅ `scripts/capture-hardware.sh` — lints clean, tested on macOS (degradation path), **not yet run
   on the Tensorbook**. This is milestone M0 and it is one-way; it should happen before more
   architecture work.
