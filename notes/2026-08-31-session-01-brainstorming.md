@@ -451,6 +451,13 @@ queue   NONE  => bare box, no Slurm/PBS  => ssh+nohup backend confirmed
 - Fix the missing `User <netid>` in the <slurm-host> GSSAPI block? (offered, not done)
 
 ## <slurm-host> AUTH RESOLVED (user-stated + measured, 2026-08-31)
+
+> **[SUPERSEDED IN PART — added 2026-08-31 during spec review]** This heading overstates what was
+> settled. What IS resolved: the user authenticates by password, which removed Kerberos/GSSAPI from
+> v1. What is NOT resolved: pubkey enrollment still fails. See "<slurm-host>: still blocked,
+> diagnosed (MEASURED)" later in this same file — the key IS offered and the server rejects it,
+> so it is server-side rejection, not a client failure. Design spec open item 16.1 is correct;
+> this heading is what was stale.
 User, verbatim: "for <slurm-host> i ssh in with my dartmouth username (netid) and password. i don't know what
 the underlying implementation/mechamism is"
 MEASURED:

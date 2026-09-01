@@ -6,3 +6,8 @@ notes/research/*-raw.json
 
 # Scratch
 *.bak-*
+
+# Hardware captures — contain serial numbers, MAC addresses, filesystem UUIDs
+# and hostnames. Local-only; redact before quoting any of it into a spec.
+notes/hardware/*
+!notes/hardware/README.md
