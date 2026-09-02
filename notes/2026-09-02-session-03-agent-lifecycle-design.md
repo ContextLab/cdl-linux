@@ -56,3 +56,64 @@ instead of two.
 State machine states and transitions · SQLite schema and ownership · crash reconciliation ·
 minimum sandbox boundary · blocked/waiting detection · `cdl status` contract · spend controls ·
 port allocation · cancellation semantics · worktree retention · job layer and backend split.
+
+### DA3 — Agent CLIs and model providers in scope
+*User-chosen, 2026-09-02.* Two axes, deliberately separated:
+
+- **Agent CLIs (supervised programs):** Claude Code, Codex, Gemini, OpenCode
+- **Model providers (where inference happens):** Ollama, LM Studio, HuggingFace (cloud *and* local)
+
+This is wider than any option offered and rules out a hard-coded single-vendor supervisor. The
+adapter interface is therefore load-bearing, and the spec must state which (agent × provider)
+pairs are supported rather than implying all of them.
+
+### DA4 — Local serving: one endpoint, many models (llama-swap)
+*User-chosen, 2026-09-02.* Reconciles §8's "one inference server ... behind a `flock` semaphore",
+which three competing servers would have contradicted. Ollama / LM Studio / HF become **model
+sources** (places weights come from), not competing servers.
+
+Reconciles §7.1's orphaned "llama-swap rationale". Research (round1-digest.md:375, verbatim):
+"Hot-swaps models behind a single stable port — the direct answer to holding one large model plus
+one fast small one on 16 GB of VRAM. Already a Pacstall package (llama-swap-bin)." The 16 GB
+figure matches the measured hardware: **RTX 3080 Laptop, 16 GB VRAM**.
+
+## Research constraints that bind this design
+
+**F1 — llama-server speaks every wire protocol we need.** round1-digest.md:223, verbatim:
+llama.cpp's llama-server "uniquely serves OpenAI chat-completions, OpenAI Responses AND Anthropic
+Messages from one binary". This is what makes one local endpoint viable across four different
+agent CLIs. Behind llama-swap it is the whole local-serving story.
+
+**F2 — Codex constrains the gateway.** round1-digest.md:324: "if Codex CLI is included it
+constrains the whole gateway design, because custom providers now accept only
+`wire_api=\"responses\"`." Covered by F1, but only because llama-server serves Responses.
+
+**F3 — Claude Code and LM Studio CANNOT BE SHIPPED.** round1-digest.md:324: "Claude Code and LM
+Studio cannot legally be shipped". Both are proprietary and get fetch-on-demand helpers that run
+the vendor's own installer so the user accepts the licence directly and the project redistributes
+nothing. Redistributable: Codex CLI (Apache-2.0, static musl), opencode (MIT), goose (Apache-2.0).
+**Gemini CLI's licence is NOT established in the research and must be verified before it is
+assumed shippable.**
+
+**F4 — routing Claude Code at a local endpoint degrades it, silently.** round2-digest.md:70,
+verbatim: "Remote Control refuses to run when ANTHROPIC_BASE_URL points anywhere but
+api.anthropic.com, and DISABLE_TELEMETRY / DO_NOT_TRACK / CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC
+/ DISABLE_GROWTHBOOK each disable it outright." round1-digest.md:324 adds that Anthropic "doesn't
+support routing Claude Code to non-Claude models through any gateway". The research's own
+recommendation: "Scope local-model routing per-project or per-shell and drive local models through
+ollama/vLLM directly rather than rewriting Claude Code's base URL machine-wide."
+
+**Consequence, and it lands squarely in this component.** Provider environment must be constructed
+**per agent process**, never set machine-wide. `cdl-agent-lifecycle` launches agents, so it owns
+that environment — which is exactly the scoping the research asks for. This also gives §7.1's
+orphaned "provider env-var spellings" (TOGETHER_API_KEY *and* TOGETHERAI_API_KEY, FIREWORKS_API_KEY
+*and* FIREWORKS_AI_API_KEY, OPENROUTER_API_KEY *and* OR_API_KEY) a home: the keystore belongs to
+`cdl-first-boot-and-environment` (§7 gives it "provider key entry, validation and leakage
+avoidance"), while assembling a specific agent's environment from it belongs here.
+
+## Component boundary, stated so it is not re-litigated
+
+- `cdl-first-boot-and-environment` owns: model **installation**, quota and GC, the unified model
+  store location, provider key entry and validation.
+- `cdl-agent-lifecycle` owns: GPU **admission**, which model is resident when, the llama-swap
+  endpoint contract, and per-agent environment construction.
