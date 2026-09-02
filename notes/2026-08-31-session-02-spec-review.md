@@ -2,6 +2,11 @@
 
 ## What happened
 
+**The review itself is stored verbatim at `notes/reviews/2026-09-01-overview-revision-1-review.md`**
+(recovered from the prompt history 2026-09-02; it had never been committed, which cost two drafts
+of the lifecycle spec an unresolvable open item). Quote it from there rather than from this
+summary.
+
 User delivered a detailed review of revision 1 of the design spec. Verdict: strong concept, well
 researched, **not implementation-ready** — "closer to an architectural thesis than a buildable system
 specification." Ten critical findings, seven recommended next steps.

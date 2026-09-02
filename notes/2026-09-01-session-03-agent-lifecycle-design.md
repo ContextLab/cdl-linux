@@ -193,8 +193,18 @@ Two further self-caught defects, from writing the fixes rather than from the rev
 
 ### Still open
 
-- **Overview review findings #6 and #7** (from the 2026-08-31 revision-1 review, *not* this
-  round). Text exists nowhere in the repo — only references. Not reconstructed, because guessing
-  a finding and then marking it resolved is worse than leaving it open. **Needs the original
-  review text from the user.**
+- ~~**Overview review findings #6 and #7**~~ ✅ **RESOLVED 2026-09-02.** The review text was
+  never in the repo — only references — so it was **recovered from the prompt history**
+  (`surfer search "architectural thesis"`, prompt `24ecf0ca-db66-45dc-80e2-661093b8ef64:1`,
+  delivered 2026-09-01T00:12:56Z) and is now stored verbatim at
+  `notes/reviews/2026-09-01-overview-revision-1-review.md`. Spec §21.1 traces every bullet of
+  both findings to where it is answered.
+
+  **One genuine gap was found by doing this**, which is the argument for traceability tables over
+  confidence: finding #6 asks how *"stale worktrees and services"* are reconciled, and drafts 1
+  and 2 reconciled **units only**. `cdl worktree gc` considers rows with `released_at` set, so a
+  worktree whose unit died unreleased had no reconciliation path at all — it would accumulate
+  forever, invisible. Closed by new §7.6, which reports stale worktrees, sockets and orphaned
+  services but deletes nothing: a wrongly-removed worktree costs uncommitted work, a stale row
+  costs a little confusion.
 - The single unreproduced `test-capture-safety.sh` failure. Not root-caused; not claimed fixed.

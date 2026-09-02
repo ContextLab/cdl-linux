@@ -656,6 +656,24 @@ design (§6, §8). Ports are freed by `cdl worktree gc`. The two resources have 
 lifetimes: VRAM is contended right now, a port block is reserved for as long as the branch it serves
 exists.
 
+### 7.6 Reconciling the resources that outlive units
+
+§7.2 reconciles *units*. Worktrees, systemd units, sockets and port blocks all deliberately
+outlive the unit that created them (§6, §8), so each can be left stale in a way no unit probe
+sees. `cdl reconcile` therefore makes a second pass over resources, and — because every one of
+these is a *deletion* — it **reports rather than removes**, leaving destruction to the explicit
+`gc` commands.
+
+| Stale shape | How it arises | What reconcile does |
+|-|-|-|
+| A worktree whose units all reached `terminal`, never released | The operator finished the work and moved on; `cdl worktree gc` only considers rows with `released_at` set, so an unreleased worktree is invisible to it forever | Lists it as **releasable**, with its branch, age and whether it has uncommitted changes. Never releases it: uncommitted work in an abandoned worktree is exactly what must not be discarded automatically. |
+| A `cdl-agent@*.service` or socket with no live row | The registry was restored from an older backup, or a row was rebuilt while its supervisor kept running | `describe`d (§7.3). Answers → re-adopt. Does not answer → a dead unit and a stale socket; the socket is unlinked and the systemd unit reported for `systemctl --user reset-failed`. |
+| A `port_block` whose `owner_worktree` row is gone | A worktree row was deleted by `gc` while its block was somehow retained | Released, in a transaction. This one *is* automatic, because a port block holds no data — the reason the others are not. |
+| A worktree directory on disk with no `worktree` row | Registry loss (§5.4), or a manual `git worktree add` | Reported as unmanaged and left alone. cdl does not adopt directories it cannot prove it created. |
+
+**Nothing here deletes a file.** The asymmetry is deliberate and worth stating once: a stale row
+costs a little confusion, and a wrongly-removed worktree costs work that was never committed.
+
 ---
 
 ## 8. Port allocation
@@ -1176,6 +1194,15 @@ Each of these is a separate test, and the last two are the ones draft 1 would ha
    `recovered`; a unit whose supervisor is also gone is reported as an orphaned artifact and **not**
    resurrected into a row (§5.4).
 
+### 18.2.1 Stale resources
+
+Finish a unit and leave its worktree unreleased; `cdl reconcile` lists the worktree as
+releasable and **does not release it**, and says whether it has uncommitted changes. Leave a
+socket behind whose supervisor is dead; reconcile unlinks it after `describe` fails, and
+re-adopts it when `describe` succeeds. Delete a `worktree` row out from under a live
+`port_block`; the block is released automatically — the one resource reconcile may reclaim
+without asking, because it holds no data (§7.6).
+
 ### 18.3 State-machine invariants
 
 - **Queued cancellation.** Cancel a unit that is still `queued` behind a concurrency limit. It
@@ -1383,7 +1410,53 @@ indistinguishable from one that fires correctly.
 
 ---
 
-## 21. Draft 1 review: findings and resolutions
+## 21. The two reviews this spec answers
+
+### 21.1 The overview's revision-1 review — findings #6 and #7
+
+Overview §7 commissions this component to resolve findings **#6 (the proposed orchestrator is
+underspecified)** and **#7 (the remote-job interface is too small)** of the 2026-09-01 review of
+overview revision 1. That review existed nowhere in the repository — only references to it — so
+both were carried as an open item through drafts 1 and 2. **It was recovered from the prompt
+history on 2026-09-02 and is now stored verbatim** at
+`notes/reviews/2026-09-01-overview-revision-1-review.md`.
+
+Each bullet, against where this spec answers it. **The finding text is quoted, not paraphrased**,
+because a requirement restated from memory is how it silently changes:
+
+**#6 — *"it does not yet describe a usable agent lifecycle"***
+
+| The review asked | Answered in |
+|-|-|
+| *"How an interactive agent gets a PTY"* | §4.2 — the supervisor opens the pair; the agent gets the slave as controlling terminal via `setsid` + `TIOCSCTTY` |
+| *"How the user attaches and detaches"* | §4.3, and §4.3.1 for who may write |
+| *"How input is injected"* | §4.3 step 3; the supervisor forwards bytes only, never translating signals |
+| *"How blocked/waiting/completed state is detected"* | §9.3 (two signals, marked best-effort), §3.1 (`waiting` is a state, not a flag), §3.2 (completion is an outcome) |
+| *"How exit status is preserved"* | §4.2 step 5, `unit.exit_code` (§5.2) |
+| *"How prompts and launch commands are recorded"* | §5.2 `launch_argv`, `launch_prompt`, `launch_env_keys` — names, never values |
+| *"How agents are cancelled"* | §3.4 — cancellation is a request; the row's owner acts on it, which is what makes queued cancellation work |
+| *"How stale worktrees and services are reconciled"* | §7.6. **This was the one genuine gap**: drafts 1 and 2 reconciled units only, and `worktree gc` considers released rows, so a worktree whose unit died unreleased had no path at all |
+| *"How a user resumes work without replaying the initial prompt"* | §4.4, and §18.1 asserts the prompt appears exactly once in the log |
+| *"There is also no process sandbox in the final spec"* | §12 |
+| *"A hash needs collision detection and an allocation registry protected by a lock"* | §8 — `IMMEDIATE`-locked check-and-record, detection against live blocks, documented fallback, exhaustion as an error |
+
+**#7 — *"the remote-job interface is too small"***
+
+| The review asked | Answered in |
+|-|-|
+| submit · list · status · logs · cancel | §15.1 |
+| *"artifacts or result location"* | §19.6 and the `artifact` table (§5.2) — draft 1 offered the command with no table behind it |
+| reconcile | §7.2's `R` ladder, §19.5 |
+| *"Idempotency semantics"* | §19.3 — keyed on the unit id, with the marker file written **before** anything starts, and a launch that cannot tell whether it started something failing rather than retrying blind |
+| *"Backend-native and CDL job identifiers"* | §5.2 — `id` (ULID) is cdl's; `remote_id`, `remote_pid`, `remote_boot_id` are the backend's |
+| *"Atomic registry writes and locking"* | §3.5 invariant 1, §5.1 (WAL, `busy_timeout`), §8's `IMMEDIATE` transaction |
+| *"Per-worktree JSON is especially risky … SQLite would likely be simpler"* | Adopted. §5 is SQLite throughout; there is no per-worktree JSON anywhere in the design |
+
+**Verdict: both are resolved**, one of them only as of this draft. Most were already answered
+because the overview's §7 brief was derived from these findings — but the traceability had never
+been written down, so nobody could check it, and §7.6's gap survived two drafts as a result.
+
+### 21.2 Draft 1 review of this document
 
 Draft 1 was reviewed 2026-09-02. Ten findings, all accepted; the review's own sequencing
 recommendation became §20. Recorded so a later reader can see what changed and why, rather than
@@ -1408,10 +1481,9 @@ diffing two drafts.
 
 | # | Item | Why it is open |
 |-|-|-|
-| 1 | **Findings #6 and #7 of the *overview's* revision-1 review** (2026-08-31 — *not* the draft 1 review in §21, which is fully resolved) | Overview §7 requires this spec to resolve them, but their text is not recorded anywhere in the repository — only referenced, in `notes/2026-08-31-session-02-spec-review.md`. They were not reconstructed, because guessing at a review finding and then marking it resolved is worse than leaving it open. Needs the original review text. |
-| 2 | T4c (destructive push to a git remote) | Named in the threat model, not closed here. Candidate: deny-by-default push credentials. Belongs to `cdl-security-and-recovery`, but agents are the actor. |
-| 3 | T4f (one credential set shared by every agent) | Per-agent credential scoping is not designed. §12.1 removes the keystore from the agent's namespace, which is a partial mitigation, not a closure. |
-| 4 | Slurm backend | Designed as a backend row and a state mapping; ships **disabled** per D30 until its auth is testable. |
-| 5 | HF Jobs backend | Depends on overview §16.4's funding question, which is unresolved. |
-| 6 | Model integrity and provenance | Research flagged pulling multi-GB weights with no checksum policy. Sits between this component and `cdl-first-boot-and-environment`; unassigned. |
-| 7 | `goose` as a fifth adapter | Apache-2.0 and Pacstall-packaged, so cheap to add. Not in v1. |
+| 1 | T4c (destructive push to a git remote) | Named in the threat model, not closed here. Candidate: deny-by-default push credentials. Belongs to `cdl-security-and-recovery`, but agents are the actor. |
+| 2 | T4f (one credential set shared by every agent) | Per-agent credential scoping is not designed. §12.1 removes the keystore from the agent's namespace, which is a partial mitigation, not a closure. |
+| 3 | Slurm backend | Designed as a backend row and a state mapping; ships **disabled** per D30 until its auth is testable. |
+| 4 | HF Jobs backend | Depends on overview §16.4's funding question, which is unresolved. |
+| 5 | Model integrity and provenance | Research flagged pulling multi-GB weights with no checksum policy. Sits between this component and `cdl-first-boot-and-environment`; unassigned. |
+| 6 | `goose` as a fifth adapter | Apache-2.0 and Pacstall-packaged, so cheap to add. Not in v1. |
