@@ -19,8 +19,10 @@ def schema_block(text):
     """The DDL block, found by content. Selecting the FIRST ```sql fence silently checked an
     illustrative snippet once a spec grew a second one, and reported success."""
     blocks = [b for b in re.findall(r'```sql\n(.*?)\n```', text, re.S) if 'CREATE TABLE' in b]
+    if not blocks:
+        return None          # a spec need not define a schema
     if len(blocks) != 1:
-        raise SystemExit(f"expected exactly one CREATE TABLE block, found {len(blocks)}")
+        raise SystemExit(f"expected at most one CREATE TABLE block, found {len(blocks)}")
     return blocks[0]
 
 def main(path):
@@ -55,6 +57,12 @@ def main(path):
         print(f"ok    all {sum(len(v) for v in refs.values())} internal section references resolve")
 
     ddl = schema_block(text)
+    if ddl is None:
+        print("ok    no schema in this spec; identifier and DDL checks skipped")
+        print("\n--- reference targets (verify by eye; resolving is not the same as being right) ---")
+        for r in sorted(refs, key=lambda x: [int(v) for v in x.split('.')]):
+            print(f"  §{r:<7} -> {heads[r]}   [{len(refs[r])}x]")
+        return fail
     cols = set(re.findall(r'^\s+([a-z_]+)\s+(?:TEXT|INTEGER|REAL)', ddl, re.M))
     cols |= set(re.findall(r'CREATE TABLE (\w+)', ddl))
     cols |= set(re.findall(r'CREATE (?:UNIQUE )?INDEX (\w+)', ddl))

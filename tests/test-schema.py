@@ -16,7 +16,11 @@ import sys
 import unittest
 from pathlib import Path
 
-SPEC = Path(__file__).resolve().parent.parent / "docs/superpowers/specs/2026-09-01-cdl-agent-lifecycle-design.md"
+# The lifecycle design was archived on 2026-09-02 (scope, not correctness -- see
+# docs/archive/README.md). These tests stay green against it on purpose: they are the
+# evidence that the archived schema was sound, and if that layer is ever built it starts
+# from here rather than from scratch. They cost 0.02s.
+SPEC = Path(__file__).resolve().parent.parent / "docs/archive/2026-09-01-cdl-agent-lifecycle-design.md"
 TS = "2026-09-01T00:00:00.000Z"
 TS2 = "2026-09-01T00:00:09.000Z"
 
