@@ -18,9 +18,9 @@ Started: 2026-09-01. Machine: TensorBook (late 2021), BIOS 1.02 dated 2022-02-12
 | 7 | Wake on USB / XHC wake | **Change** → disable if exposed | ➖ | **ABSENT.** Only `Legacy USB Support [Enabled]` exists — kept |
 | 8 | Thunderbolt / USB4 security level | **Change** → lower, or pre-authorise dock | ➖ | **No security level exposed.** Master toggle only, `[Enabled]` — kept |
 | 9 | Sleep mode S3 vs Modern Standby | Verify S3 stays selected | ✅ | No selector exposed; `deep` already selected & cannot be flipped |
-| 10 | VT-d / IOMMU | Verify **enabled**, leave alone | ➖ | **Not exposed anywhere.** Resolve by measurement (item 11) |
+| 10 | VT-d / IOMMU | Verify **enabled**, leave alone | ✅ | **MEASURED ACTIVE** — 4 DMAR units, TB DMA protection `1` |
 | 12 | UEFI Network Stack *(added mid-walk)* | **Change** → disable | ✅ | **Already `Disabled`.** Desired state; no change made |
-| 11 | Save & exit, post-reboot verification | Run verification block | ⬜ | |
+| 11 | Save & exit, post-reboot verification | Run verification block | ✅ | Ran 2026-09-02; see `tensorbook-20260902T030111Z-firmware-verify.md` |
 
 Legend: ⬜ not started · 🔄 in progress · ✅ done · ⛔ blocked · ➖ not exposed (a finding)
 
@@ -384,3 +384,32 @@ gates a push. Reproduce by running `tests/run-all.sh` from a clean checkout and 
 FULL output, not a tail.
 
 This does not block the firmware work — nothing in it touches the captures.
+
+## Item 11 results (2026-09-02)
+
+- **VT-d: ACTIVE.** `dmar0..dmar3`, TB domain0 DMA protection `1`, DMAR ACPI table present. The
+  profile's recommendation was right; its cited evidence was not. Now a direct read with a date.
+- **Thermal lever exists.** `no_turbo` and `max_perf_pct` both present and writable under
+  `intel_pstate`. SS16.5's throttling policy is implementable. Fan inputs and writable PWM still 0.
+- **XHCI wake is ARMED at S3** (`pci:0000:00:14.0`), and S3 is what this machine suspends to.
+  The unsafe-shutdown mechanism is confirmed present. 13 wake sources enabled in total; XHCI is
+  the only one at S3.
+- **Unchanged state confirmed:** `mem_sleep s2idle [deep]`, `power/state freeze mem`,
+  `lockdown none [integrity] confidentiality`, `SecureBoot enabled`. The Fast Boot change
+  disturbed nothing.
+
+### Defect found in scripts/verify-firmware.sh, fixed
+
+The device count printed `0` twice and cannot be trusted:
+
+1. The regex matched the multibyte bullet glyph prefixing each `boltctl list` entry. Inside a
+   bracket expression that is locale-dependent, so it could count 0 against a populated list.
+   Replaced with `uuid:`, which appears once per device and is plain ASCII. Counted only, never
+   printed - it identifies the device.
+2. `grep -c` prints `0` **and** exits 1 on no matches, so the `|| echo 0` fallback appended a
+   second zero to the field. Removed.
+
+**The reported "0 stored devices" is therefore not evidence that the dock is unenrolled.**
+Re-measure before drawing any conclusion - the 2026-09-01 follow-up saw the T4801 stored with
+`policy: iommu`, and boltd stores devices persistently. Also added: TB domain0 security level,
+the only place firmware's Thunderbolt policy is visible given item 8.

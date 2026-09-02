@@ -219,7 +219,7 @@ permanently unavailable to agents.
 | Kernel lockdown state not read | ✅ **Closed** — `[integrity]` confirmed active; D29's cause is now observation, not inference |
 | Fan, hwmon and thermal-zone inventory absent | ✅ **Closed** — no fan telemetry or control exists; 29 cooling devices; policy must rest on throttling |
 | Four firmware observations not made | ✅ **Closed** — AMI Aptio V walked 2026-09-01; all four answered. See `notes/hardware/firmware-gate-checklist.md` |
-| VT-d state not directly read | ⬜ **Open** — no firmware toggle exists, so it cannot be read from setup. Measure with `scripts/verify-firmware.sh` |
+| VT-d state not directly read | ✅ **Closed** — measured 2026-09-02: 4 DMAR units, TB DMA protection `1`. VT-d is active |
 | Battery `charge_full_design` absent | Expected — this battery reports in energy units, and `energy_full_design` was captured |
 | Which GPU drives a docked external monitor | ⬜ **Deferred to M2** (§16.6). The follow-up did identify the dock itself: a **USB4 dock, "T4801" (Shenzhen Lianfaxun)**, already authorized with `iommu` policy, showing `disconnected` at capture time |
 | NVIDIA connectors absent from this run | ⬜ Only `card1` (i915) connectors were enumerated this time, though the first capture saw `card0-DP-5`…`DP-8` and `HDMI-A-1`. Most likely the dGPU was runtime-suspended or unbound. **Re-check while docked** — it bears directly on §16.6 |
@@ -261,6 +261,62 @@ VMD/RAID-class controller in `lspci`.*
 | "Lower the Thunderbolt/USB4 security level" | **No security level is exposed.** `Advanced → Thunderbolt Configuration` contains one line, `Integrated Thunderbolt Support [Enabled]` | Authorisation lives wholly in `boltd`. **`bolt`/`boltctl` is now a HARD dependency for M3**: if it is absent after the reinstall, or its database does not carry across, the dock cannot be authorised and **no firmware setting can rescue it** |
 | "Disable Wake on USB / XHC wake if exposed" | **Not exposed.** `Advanced → USB Configuration` contains one line, `Legacy USB Support [Enabled]`. No wake-from-Thunderbolt either | The spurious-wake hypothesis for the 65–66 unsafe shutdowns is testable and fixable **only** via `/proc/acpi/wakeup`, and any fix must be made persistent by cdl-linux, because that file resets every boot |
 | "Keep S3 — verify it stays selected" | **No S3 / Modern Standby selector exists** | Benign absence: `mem_sleep` already reads `s2idle [deep]`, the outcome we wanted, and nothing can now flip it by accident |
+
+### Wake sources — MEASURED, and the unsafe-shutdown suspect is armed
+
+Measured 2026-09-02 from `/proc/acpi/wakeup`. Firmware exposes no wake control (see above), so
+this is the only place the machine's wake configuration is visible or changeable.
+
+**13 wake sources are enabled.** Twelve are armed at **S4**: `PEG0`, `PEG1`, `PEG2` (PCIe
+graphics), `RP17`, `RP19`, `RP20` (root ports), `TXHC`, `TDM0`, `TDM1`, `TRP0`, `TRP2`
+(Thunderbolt), and `AWAC`.
+
+**One is armed at S3, and it is the suspect:**
+
+```
+XHCI	  S3	*enabled   pci:0000:00:14.0
+```
+
+`XHCI` is the main USB controller, and **S3 is the state this machine actually suspends to** —
+`mem_sleep` reads `s2idle [deep]`, deep selected. So any USB event can wake this laptop out of
+suspend. That is precisely the mechanism behind the profile's candidate explanation for the
+**65–66 unsafe shutdowns**: a machine that wakes in a bag, overheats or drains, and gets
+power-cycled by hand. The hypothesis was previously research-flagged and untested on this unit.
+**It is now confirmed that the mechanism is armed**, which is not the same as confirming it
+fired — that needs a suspend/resume log, not a settings read.
+
+**Test, one command, reversible, no reboot:**
+
+```bash
+echo XHCI | sudo tee /proc/acpi/wakeup    # toggles; re-run to restore
+grep XHCI /proc/acpi/wakeup               # confirm it now reads *disabled
+```
+
+**Cost of disabling:** USB devices can no longer wake the machine from suspend. The lid switch
+and power button still can, so on a laptop this is close to free.
+
+**Persistence is owed by cdl-linux.** `/proc/acpi/wakeup` resets on every boot, so a fix must be
+reapplied by a systemd unit or udev rule. Carry into `cdl-first-boot-and-environment` alongside
+the `boltd` dependency. Do **not** disable the Thunderbolt entries (`TXHC`, `TDM0`, `TDM1`,
+`TRP0`, `TRP2`) as part of this — they are armed at S4, not S3, and docking is a requirement.
+
+### Thermal policy — the lever exists, confirmed
+
+Item 5 established there is no fan control anywhere, leaving §16.5's policy resting entirely on
+throttling. That policy is now confirmed **implementable** (measured 2026-09-02):
+
+```
+intel_pstate no_turbo             : 0      (turbo currently on)
+intel_pstate max_perf_pct         : 100    (no cap applied)
+scaling driver (cpu0)             : intel_pstate
+fan inputs                        : 0      (as before)
+writable PWM                      : 0      (as before)
+```
+
+Both `no_turbo` and `max_perf_pct` are present and writable, so cdl-linux can drop turbo and cap
+sustained frequency under agent load and restore them afterwards. This is why Turbo Mode and
+Hyper-Threading stay enabled in firmware: the ceiling belongs there, the duty cycle belongs to
+the OS.
 
 ### Secure Boot — unchanged, and the decision is reversible
 
@@ -309,7 +365,7 @@ still load, then keep it off or re-enable. One reboot each way, fully reversible
   never network-boots, and it is pre-boot attack surface running at full firmware privilege.
   Recorded so that a firmware update re-enabling it is detectable.
 
-### VT-d / IOMMU — correction: the state is NOT established
+### VT-d / IOMMU — MEASURED ACTIVE. Claim was true; its stated evidence was not
 
 *This section previously asserted "VT-d — leave enabled. The Thunderbolt `iommu` policy depends
 on it." That assertion is withdrawn as stated.*
@@ -324,11 +380,24 @@ strong evidence, but it is one inference removed and a stored policy persists fr
 was set. The first raw capture contains **zero** `iommu` mentions; the string appears only in the
 follow-up.
 
-**Settle it by direct measurement, not by menu archaeology:** `scripts/verify-firmware.sh`
-reads `/sys/class/iommu/`, the DMAR kernel messages, and
-`/sys/bus/thunderbolt/devices/domain0/iommu_dma_protection`. If `/sys/class/iommu/` is empty,
-the Thunderbolt DMA-protection reasoning above needs revising. Until that runs, treat VT-d's
-state as **unknown**.
+**Settled by direct measurement 2026-09-02** (`scripts/verify-firmware.sh`, recorded in
+`notes/hardware/tensorbook-20260902T030111Z-firmware-verify.md`):
+
+```
+/sys/class/iommu entries          : dmar0 dmar1 dmar2 dmar3
+TB domain0 DMA protection         : 1
+ACPI: DMAR 0x000000005B91F000 0000B8 (v02 INTEL  EDK2 ...)
+DMAR: Host address width 39
+DMAR: dmar0: reg_base_addr fed90000 ver 4:0 ...
+```
+
+**VT-d is ACTIVE**, with four DMAR units and Thunderbolt pre-boot DMA protection reporting `1`.
+The original recommendation ("leave VT-d enabled") was therefore **correct**; what was wrong was
+the evidence it cited. The distinction matters because a claim that happens to be true while
+resting on the wrong derivation will survive until the day the derivation changes and nobody
+notices. This one is now a direct read with a date, not an inference from a stored policy.
+
+Nothing to change: VT-d cannot be switched off from this firmware in any case.
 
 ### The graphics-mode trade-off, now that docking is a requirement (R18)
 

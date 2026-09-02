@@ -184,7 +184,17 @@ echo
 echo '```'
 if command -v boltctl >/dev/null 2>&1; then
     printf '%-34s: %s\n' "boltctl" "present"
-    printf '%-34s: %s\n' "stored/known devices" "$(boltctl list 2>/dev/null | grep -c '^ *[●○*-]' || echo 0)"
+    # Count one line per device. An earlier version matched the bullet glyph that prefixes
+    # each entry; that is multibyte, so the bracket expression was locale-dependent and
+    # counted 0 against a populated list. `uuid:` appears exactly once per device and is
+    # plain ASCII. Counted only — never printed, because it identifies the device.
+    # grep -c always prints a number and exits 1 on zero matches, so no `|| echo 0`: that
+    # appended a SECOND zero to the field.
+    bolt_n="$(boltctl list 2>/dev/null | grep -c 'uuid:')"
+    printf '%-34s: %s\n' "stored/known devices" "${bolt_n:-0}"
+    # The domain's security level is what firmware would have set. Firmware exposes no
+    # Thunderbolt policy at all (checklist item 8), so this is the only place it is visible.
+    show "TB domain0 security level" /sys/bus/thunderbolt/devices/domain0/security
 else
     printf '%-34s: %s\n' "boltctl" "MISSING — hard dependency per checklist item 8"
 fi
