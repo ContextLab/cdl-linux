@@ -9,7 +9,7 @@ component: *"Write this one first — it holds the differentiating functionality
 <!-- check-spec-allow:
 busy_timeout foreign_keys journal_mode
 intel_pstate max_perf_pct no_turbo apparmor_restrict_unprivileged_userns
-launch_failed node_modules record_sha256 wire_api
+launch_failed budget_exceeded node_modules record_sha256 wire_api
 -->
 
 **Reference convention.** A bare `§4.2` refers to a section *of this document*. A reference to the
@@ -128,6 +128,7 @@ Meaningful only in `terminal`.
 | `failed` | Exited non-zero. The exit code is recorded separately. |
 | `launch_failed` | Never reached `running`. Written by **admission** for pre-handoff failures (unsupported adapter/provider pair, thermal denial, sandbox precheck, port exhaustion, concurrency-permanent refusal) and by the **supervisor** for post-handoff ones (worktree, PTY, sandbox construction, `exec`). §3.4 says which. |
 | `cancelled` | Terminated at the operator's request. |
+| `budget_exceeded` | Terminated by cdl because the unit passed its declared budget (§13.1). Distinct from `cancelled`, because "you stopped this" and "your money ran out" lead to different next actions, and draft 4 recorded both as `cancelled`. |
 | `lost` | Reconciliation found no live process for a row that claimed to be live. |
 
 **`lost` is deliberately distinct from `failed`.** "We do not know what happened" and "it returned
@@ -403,10 +404,36 @@ UPDATE unit SET launch_ack_at=:now, supervisor_pid=?, boot_id=?
  WHERE id=? AND state='starting' AND launch_ack_at IS NULL AND launch_id=?;
 ```
 
+**Every write into this window is conditional — all four of them.** Draft 4 made two of them
+compare-and-swap and left admission's spawn-failure write (step 2) and admission's cancellation
+(§3.4) unconditional, which reopened the race from the other side: a `systemd-run` reporting
+failure *after* the supervisor already acknowledged would overwrite a `running` row with
+`terminal(launch_failed)` and free its lease, leaving a live agent behind a terminal row. Both
+carry the same guard:
+
+```sql
+-- admission, step 2: the spawn failed -- but only if nobody acknowledged first
+UPDATE unit SET state='terminal', outcome='launch_failed', ended_at=:now
+ WHERE id=? AND state='starting' AND launch_ack_at IS NULL;
+
+-- admission, cancelling a unit it still owns
+UPDATE unit SET state='terminal', outcome='cancelled', ended_at=:now
+ WHERE id=? AND state IN ('queued','starting') AND launch_ack_at IS NULL;
+```
+
 **Each checks the affected row count and yields if it is zero.** A reconciler that loses exits
 without writing an event. A supervisor that loses has been declared failed: it **exits without
 `exec`ing the agent**, which is what keeps the outcome honest — the row says nothing ran, and
-nothing ran. Whichever commits first wins, and the loser can tell that it lost.
+nothing ran. Admission that loses a spawn-failure race logs the discrepancy and leaves the row to
+its supervisor. Whichever commits first wins, and the loser can tell that it lost.
+
+**A backwards clock must not strand a row.** `launch_deadline < :now` is the only exit from
+`starting` with a null acknowledgement, so a clock stepping backwards leaves `L0` answering
+*"leave it alone"* forever, holding a GPU lease and a §14 slot. `L0` therefore carries a second,
+clock-independent bound: a `starting` row whose `created_at` is older than a hard maximum
+(default 1 h, always far above `launch_deadline`) is resolved `launch_failed` whatever the
+deadline comparison says. Timestamps compare in the one pinned format §5.2 fixes; comparing them
+as free-form text is measurably wrong.
 
 ---
 
@@ -440,6 +467,16 @@ CREATE TABLE schema_version (
     applied_at  TEXT    NOT NULL
 );
 
+-- TIMESTAMP FORMAT, and it is load-bearing rather than a convention. Every TEXT timestamp in
+-- this schema is UTC ISO-8601 with milliseconds and a literal Z -- `YYYY-MM-DDTHH:MM:SS.sssZ`,
+-- exactly what strftime('%Y-%m-%dT%H:%M:%fZ','now') produces. SQLite compares TEXT
+-- lexicographically, so mixed formats compare WRONG rather than failing:
+--     '2026-09-01T10:00:00Z'  < '2026-09-01T10:00:00.5Z'  ->  0   (should be 1)
+--     '2026-09-01 10:00:00'   < '2026-09-01T09:00:00Z'    ->  1   (should be 0)
+-- Both measured. §4.5's `launch_deadline < :now` is an inequality on one of these columns, so
+-- an unpinned format is a correctness bug in the launch handoff, not a formatting preference.
+-- One helper in the write layer produces every timestamp; nothing formats one inline.
+
 CREATE TABLE unit (
     id                  TEXT PRIMARY KEY,          -- ULID: sorts by creation time
     kind                TEXT NOT NULL CHECK (kind IN ('agent','job')),
@@ -447,7 +484,7 @@ CREATE TABLE unit (
     state               TEXT NOT NULL CHECK (state IN
                           ('queued','starting','running','waiting','stopping','terminal')),
     outcome             TEXT CHECK (outcome IN
-                          ('completed','failed','launch_failed','cancelled','lost')),
+                          ('completed','failed','launch_failed','cancelled','budget_exceeded','lost')),
     exit_code           INTEGER,
 
     backend             TEXT NOT NULL CHECK (backend IN ('local','ssh','slurm','hfjobs')),
@@ -459,7 +496,8 @@ CREATE TABLE unit (
 
     -- Launch handoff (§4.5). launch_ack_at NULL means admission still owns the row.
     launch_id           TEXT,
-    launch_deadline     TEXT,
+    launch_deadline     TEXT CHECK (launch_deadline IS NULL OR
+                          launch_deadline GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z'),
     launch_ack_at       TEXT,
 
     -- Probe state (§7.2). Two timestamps, because they answer different questions:
@@ -491,6 +529,14 @@ CREATE TABLE unit (
     -- worktree and port block ARE deleted, by §6.1. Without these clauses both deletions fail
     -- with FOREIGN KEY constraint failed for any worktree that ever ran a unit -- that is, all
     -- of them -- so `cdl worktree rm` could not execute at all. Measured, not reasoned about.
+    -- Denormalised at creation, and NOT nulled when the worktree is collected. The FK below
+    -- must be ON DELETE SET NULL for §6.1 to run at all, which means the reference disappears
+    -- when the worktree does -- measured. Without these two columns a terminal unit stops
+    -- recording which branch its work happened on, which is what §20.1's log retention and
+    -- any post-hoc review read. History belongs on the unit row; the FK is only a live link.
+    worktree_path       TEXT,
+    branch              TEXT,
+
     worktree_id         TEXT REFERENCES worktree(id)   ON DELETE SET NULL,
     port_block_id       TEXT REFERENCES port_block(id) ON DELETE SET NULL,
     gpu_lease_id        TEXT REFERENCES gpu_lease(id),
@@ -523,9 +569,13 @@ CREATE TABLE unit (
     CHECK ((state = 'terminal') = (ended_at IS NOT NULL)),
     -- §3.3: a job has no human in the loop, so it can never be `waiting`. The database
     -- refused nothing here until draft 4; the rule existed only in prose.
-    CHECK (NOT (kind = 'job' AND state = 'waiting')),
-    -- §9.3: waiting_source is set exactly when the unit is waiting.
-    CHECK ((state = 'waiting') = (waiting_source IS NOT NULL))
+    CHECK (NOT (kind = 'job' AND state = 'waiting'))
+    -- NO biconditional on waiting_source. Draft 4 had
+    --   CHECK ((state='waiting') = (waiting_source IS NOT NULL))
+    -- which made `waiting` a TRAP STATE: every exit from it -- to running, to stopping, to
+    -- terminal -- failed the constraint, because no transition cleared the column. Measured.
+    -- waiting_source is a record of the detector that most recently moved this unit into
+    -- `waiting` (§9.3); it is read only while state='waiting' and ignored otherwise.
 );
 
 CREATE INDEX unit_attention  ON unit(state) WHERE state = 'waiting';
@@ -589,7 +639,8 @@ CREATE TABLE spend_ledger (           -- append-only; unit.spend_micros is a cac
     tokens_out  INTEGER,
     micros      INTEGER,          -- USD micros; see the note on unit.spend_micros
     estimated   INTEGER NOT NULL DEFAULT 0,
-    source      TEXT NOT NULL     -- 'adapter' | 'provider-api' | 'price-table'
+    source      TEXT NOT NULL,    -- 'adapter' | 'provider-api' | 'price-table' | 'remote'
+    remote_ref  TEXT              -- the remote's own id for this record; the dedupe key
 );
 
 -- Artifacts produced by a job (§15.1 `cdl job artifacts`, §19.8). Draft 1 offered the command
@@ -597,6 +648,7 @@ CREATE TABLE spend_ledger (           -- append-only; unit.spend_micros is a cac
 CREATE TABLE artifact (
     id          TEXT PRIMARY KEY,
     unit_id     TEXT NOT NULL REFERENCES unit(id),
+    name        TEXT NOT NULL,    -- the manifest's key for this artifact; dedupe key
     kind        TEXT NOT NULL CHECK (kind IN ('file','dir','log')),
     remote_path TEXT,             -- where it was produced, if a remote backend
     local_path  TEXT,             -- where it was retrieved to, once fetched
@@ -609,9 +661,16 @@ CREATE INDEX artifact_unit ON artifact(unit_id);
 -- One row per artifact per unit. R3 can import the same terminal result more than once -- two
 -- reconcilers, or one retried after a crash between the import and the commit -- and without
 -- this the manifest is appended again each time.
-CREATE UNIQUE INDEX artifact_identity ON artifact(unit_id, remote_path);
--- Same reasoning for imported spend: an import carries the remote's own record id.
-CREATE UNIQUE INDEX spend_import ON spend_ledger(unit_id, source, at) WHERE source <> 'adapter';
+-- Local path, not remote: remote_path is NULL for a local job's artifacts, and NULLs do not
+-- collide in a UNIQUE index, so keying on it deduplicated nothing for exactly the rows that
+-- needed it. `name` is the manifest's own key and is never null.
+CREATE UNIQUE INDEX artifact_identity ON artifact(unit_id, name);
+
+-- Imported spend is deduplicated on the REMOTE's record id, which draft 4's comment claimed
+-- and its index did not have -- it keyed on (unit_id, source, at), which both admits two
+-- imports of one record whose timestamps differ AND rejects two genuine records that share a
+-- timestamp, silently dropping spend that §13.2's ceiling depends on. Both measured.
+CREATE UNIQUE INDEX spend_import ON spend_ledger(unit_id, remote_ref) WHERE remote_ref IS NOT NULL;
 ```
 
 **Every state change writes both tables in one transaction** (§3.5 invariant 1). There is no code
@@ -714,9 +773,10 @@ state that is either correct or merely untidy, and never one the schema forbids:
 
 1. Refuse if any unit in this worktree is non-terminal.
 2. Refuse if the working tree has uncommitted changes or unpushed commits, unless `--force`.
-3. **`rename()` the directory** to a sibling `.cdl-trash-<worktree-id>`. This is atomic within one
-   filesystem, and it is what makes the rest safe: after it, no path collision is possible and the
-   worktree is already invisible to git.
+3. **`rename()` the directory** to a sibling `.cdl-trash-<worktree-id>`. Atomic within one
+   filesystem, and it is what makes the rest safe: after it, no path collision is possible.
+   **It does not make the worktree invisible to git** — draft 4 claimed that and it is wrong:
+   `git worktree list` still shows the entry, marked `prunable`, until `git worktree prune` runs.
 4. **One transaction**: `DELETE FROM port_block WHERE owner_worktree = ?` first — the reference is
    `ON DELETE RESTRICT`, so the reverse order fails — then `DELETE FROM worktree WHERE id = ?`.
    Both succeed only because `unit.worktree_id` and `unit.port_block_id` are `ON DELETE SET NULL`
@@ -724,13 +784,27 @@ state that is either correct or merely untidy, and never one the schema forbids:
    the statement, not the transaction**, so the caller checks each result and issues an explicit
    `ROLLBACK` — a loop that ignores the error and commits would delete the worktree row and leave
    the block behind.
-5. `git worktree prune` and remove the trash directory.
+5. `git worktree prune`, then remove the trash directory.
 
-**Every crash point is recoverable.** Before 3: nothing happened. Between 3 and 4: a trash
-directory and rows that still reference it — `cdl worktree gc` finds the trash by its name prefix
-and completes the operation. After 4: a trash directory with no rows, removed on the next `gc`.
-**The one state that never occurs is a `worktree` row with no directory**, which is the invariant
-§5.2 depends on; draft 3 removed the directory first and could produce exactly that.
+**Every crash point is recoverable, and recovery must not depend on the rows**, because after
+step 4 there are none. `gc` therefore begins by scanning for `.cdl-trash-*` directories **by name**
+and running `git worktree prune` unconditionally, before it looks at any row:
+
+| Crash after | State left | How `gc` finishes it |
+|-|-|-|
+| step 2 | Nothing changed | — |
+| step 3 | Trash directory, rows still present, git entry `prunable` | Name scan finds the trash, rows are still there to delete, then prune |
+| step 4 | Trash directory, **no rows**, git entry still `prunable` | Name scan finds the trash; prune clears the git entry. Draft 4 iterated rows here, found none, and never pruned — leaving `git worktree add` failing with *"is a missing but already registered worktree"* |
+
+**A `worktree` row whose directory is already renamed away exists between steps 3 and 4**, and
+draft 4 claimed that state never occurs. It does, briefly, and §7.6 covers it: a row whose path is
+absent while a matching `.cdl-trash-*` sibling exists is an interrupted removal, reported as
+**resumable** rather than as corruption.
+
+**Reuse needs the right git command.** After removal the *branch still exists* — correctly; a
+branch is not a worktree — so recreating uses `git worktree add <path> <branch>` against the
+existing branch. `git worktree add -b <branch>` fails with *"a branch named '<branch>' already
+exists"*, which is git working as intended and not a defect to design around.
 
 That is the whole lifecycle, and it is what makes the plain `UNIQUE` constraints in §5.2 correct:
 a path or a port is reserved while the thing it names exists, and free the moment it does not.
@@ -798,7 +872,8 @@ alive nor dead and draft 2 had no way to say so:
 | # | Check | Conclusion |
 |-|-|-|
 | L0 | `state = 'starting'`, `launch_ack_at` null, `now < launch_deadline` | **Launching. Leave the row alone.** |
-| L0′ | `state = 'starting'`, `launch_ack_at` null, `now >= launch_deadline` | `terminal(launch_failed)` — the supervisor never acknowledged. Not `lost`: nothing was confirmed running. |
+| L0′ | `state = 'starting'`, `launch_ack_at` null, and either `now >= launch_deadline` or `created_at` older than the hard maximum | `terminal(launch_failed)` — the supervisor never acknowledged. Not `lost`: nothing was confirmed running. |
+| L0″ | `state = 'starting'`, `launch_ack_at` **set**, but the ladder below finds no process | `terminal(launch_failed)` — the supervisor acknowledged, then died before reaching `running`, so it never `exec`'d the agent. Draft 4 fell through to `L2` here and wrote `lost`, which §3.2 reserves for a unit that *was* confirmed running. A unit that never left `starting` did not lose work; it failed to launch. |
 
 **`backend = 'local'`** — the local boot is the right frame of reference:
 
@@ -823,6 +898,7 @@ job finishing successfully, and a finished job has no process:
 |-|-|-|
 | R1 | Host unreachable | **Unknown.** Record the attempt; leave `state` untouched. Never `lost`. |
 | R2 | Reachable, but the marker's `unit_id`/`launch_id` do not match the row | **Not ours.** Report the directory as unattributable; conclude nothing about the unit. |
+| R2′ | Reachable, and the marker is **absent** (the remote directory was collected by §19.10, or the host was rebuilt) | Fall through to `R4`–`R6`. A missing marker is not a mismatch: draft 4's `R2` matched nothing here and concluded nothing, so the row stayed `running` for ever with no ladder row able to resolve it. |
 | R3 | Reachable, marker carries a **complete and verified terminal result** (§19.6) | **Finished.** Import it: `outcome`, `exit_code`, `started_at`, `ended_at`, artifacts. |
 | R4 | Reachable, no terminal result, remote boot id differs from `remote_boot_id` | **Dead** (`lost`). The remote machine rebooted mid-run. |
 | R5 | Reachable, same boot, no result, no process matching `remote_pid` **and** the unit id in its cmdline | **Dead** (`lost`). |
@@ -872,16 +948,27 @@ falls through to the next check. Authentication is `SO_PEERCRED` against the soc
 is sufficient because the whole system is single-user by design and the socket is mode 0600 inside
 `$XDG_RUNTIME_DIR`.
 
+**`describe` has a timeout — default 2 s, configurable** — and exceeding it counts as *silent*,
+not as dead. Without a stated bound "the socket did not answer" has no operational meaning, `L5`
+cannot be reached deterministically, and §18.2.3's silent-socket test has nothing to induce.
+
 #### 7.3.1 Discovery without the registry
 
 `describe` also makes re-adoption possible when the registry cannot name the rows to probe — the
 case §5.4 creates. Reconciliation can enumerate live supervisors **independently of the database**,
 from two sources that do not depend on it:
 
-1. `systemctl --user list-units 'cdl-agent@*.service'`
+1. `systemctl --user list-units 'cdl-agent-*.service'` — one spelling, §20.5's
 2. The sockets in `$XDG_RUNTIME_DIR/cdl/*.sock`
 
 Each is `describe`d. Any supervisor that answers is real regardless of what the registry knows.
+
+**A rebuilt row carries no live references.** `worktree_id`, `port_block_id`, `gpu_lease_id` and
+`resumed_from` all point at rows a fresh database does not have, so a rebuild that copied them
+from the manifest fails with `FOREIGN KEY constraint failed` — measured. The rebuild writes them
+**null** and restores the *facts* instead, from the manifest's `worktree_path` and `branch`
+(§5.2), which is why those two columns are denormalised onto the unit in the first place. The
+worktree directory itself is reported as unmanaged (§7.6) rather than re-adopted.
 
 **What a handshake cannot recover is the unit's creation facts** — its launch prompt, budget,
 provider, worktree and port block are not things a running supervisor can be trusted to reconstruct
@@ -932,7 +1019,7 @@ matters is not file-versus-row, it is **whether the thing holds data nobody can 
 
 | Tier | Rule | Applies to |
 |-|-|-|
-| **1 · Ephemeral** | Reconcile **removes** it, no confirmation | A socket whose `describe` did not answer; a failed systemd unit's metadata (`systemctl --user reset-failed`). Neither holds data. |
+| **1 · Ephemeral** | Reconcile **removes** it, no confirmation | A socket belonging to a unit **the ladder concluded is dead**; a failed systemd unit's metadata (`systemctl --user reset-failed`). Neither holds data. **A silent socket is not sufficient** — `L5` covers a live supervisor whose socket stopped answering, and unlinking that severs attach for a healthy agent. Draft 4 said "a socket whose `describe` did not answer", contradicting `L5` one section above. |
 | **2 · Data-bearing** | Reconcile **only reports** | Worktrees, remote directories, log files, unmanaged directories. Removing any of these can destroy uncommitted work. |
 | **3 · Administrative** | Only an explicit command removes it | `cdl worktree rm` / `gc` (§6.1), `cdl job gc` (§19.10). Confirmation and refusal rules live there. |
 
@@ -941,9 +1028,10 @@ The resource pass:
 | Stale shape | How it arises | Tier | What reconcile does |
 |-|-|-|-|
 | A worktree whose units all reached `terminal` | The operator finished and moved on | 2 | Lists it as **collectable**, with branch, age and whether it has uncommitted changes or unpushed commits. Removes nothing. |
-| A `cdl-agent-*` service or socket whose row is **absent** | Registry loss (§5.4) | 1 / 2 | `describe`d. Answers → rebuild the row from the launch manifest (§7.3.1). Silent → unlink the socket and `reset-failed` the unit. |
+| A `cdl-agent-*.service` or socket whose row is **absent** | Registry loss (§5.4) | 1 / 2 | `describe`d. Answers → rebuild the row from the launch manifest (§7.3.1). Silent → unlink the socket and `reset-failed` the unit. |
 | …whose row is **terminal** | Registry restored from a backup older than the unit's completion, or a supervisor that outlived its own terminal write | — | **Never re-adopted.** `terminal` is final (§3.1) and no actor may leave it, so a running supervisor here is the anomaly, not the row. cdl asks it to shut down, reports the conflict with both timestamps, and unlinks the socket only once it has exited. Draft 3's "answers → re-adopt" would have written `terminal → running`, which the state machine forbids and §3.4 gives nobody the authority to do. |
 | A worktree directory on disk with no `worktree` row | Registry loss (§5.4), or a manual `git worktree add` | 2 | Reported as unmanaged. cdl does not adopt directories it cannot prove it created, and does not delete them either. |
+| A `worktree` row whose `path` is absent, with a matching `.cdl-trash-*` sibling | A removal interrupted between §6.1 steps 3 and 4 | 3 | Reported as a **resumable removal**, finished by `cdl worktree gc`. |
 
 **There is no orphaned-port-block row, and draft 2's was impossible.** It described reconciling *"a
 `port_block` whose `owner_worktree` row is gone"* and its acceptance test instructed an implementer
@@ -1232,7 +1320,8 @@ It is the **default, and sufficient, for two cases**:
 to a provider over TCP, and they read their credentials from their own environment (§10.3) — the
 supervisor cannot proxy on their behalf without terminating and re-originating their traffic, which
 is stage 2's job. So between slice 2 and slice 4, **an API-backed unit runs with ordinary
-unrestricted egress**, which is precisely the state overview §12 records for T4a today. That is a
+unrestricted egress**, which is precisely the state **overview §5** (the threat model) records for
+T4a today. That is a
 gap this spec carries openly rather than one it closes early; §21 is where it closes.
 
 #### Stage 2 — controlled egress for units that need the open internet
@@ -1330,8 +1419,7 @@ like a cap and would be believed as one.
 ### 13.1 Per-unit budget
 
 `--budget <usd>` at creation, converted to micros and recorded in `budget_micros` (§5.2). On observed
-exceedance the supervisor drives `stopping → terminal(cancelled)` and records the reason and the
-overshoot. Absent a budget, the global ceiling (§13.2) still applies.
+exceedance the supervisor drives `stopping → terminal(budget_exceeded)` and records the overshoot. Absent a budget, the global ceiling (§13.2) still applies.
 
 ### 13.2 Global daily ceiling
 
@@ -1386,7 +1474,7 @@ cdl agent new [--adapter X] [--provider Y] [--model Z] [--branch B]
               [--budget USD] [--prompt-file F] [--vram MIB] [--no-worktree]
               [--no-record-prompt]              # §20.4
 cdl agent list | cancel <id> | logs <id> [-f] [--raw]   # --raw: §20.2
-cdl agent attach <id> [--takeover]          # §4.3.1; without it, attaches as observer
+cdl agent attach <id> [--takeover]          # §4.3.1: writer if none, else observer
 cdl job submit [--backend local|ssh|slurm|hfjobs] ... | list | status <id>
               | logs <id> [-f] | cancel <id>     # local is the default; §3.3
 cdl job artifacts <id> [--fetch]            # §19.8
@@ -1428,9 +1516,16 @@ cdl doctor
 Two places, both permitted because the overview allows amendment *"on new evidence from a spike, a
 hardware capture, or a component spec."*
 
-1. **Overview §8's "one inference server"** is preserved rather than contradicted, but its *content* is now
-   specified as llama-swap + `llama-server` (§10.1), which the overview did not name. Overview §7.1 lists the
-   llama-swap rationale as content with no written destination; this is that destination.
+1. **Overview §8's "one inference server"** is preserved rather than contradicted, but its *content*
+   is now specified as llama-swap + `llama-server` (§10.1), which the overview did not name.
+   **This is a divergence and needs declaring as one.** Overview §7.1 routes the LLM layer — and
+   the llama-swap rationale with it — to `cdl-first-boot-and-environment`, marking the rationale
+   "not yet rewritten anywhere". Draft 4 read that as *no destination* and claimed this spec was
+   it, which took content the frozen document assigns elsewhere. The split that actually holds:
+   **`cdl-first-boot-and-environment` owns installation, the model store and packaging**
+   (§1.2 already says so); this spec specifies only the **serving topology**, because §11's GPU
+   admission is meaningless without knowing what holds VRAM resident. The rationale text still
+   belongs to that other spec.
 2. **Overview §16.5's thermal input** is hardened by the M0 firmware walk of 2026-09-01: no fan control
    exists in firmware or OS, so the admission gate in §11.4 is the only enforcement mechanism, not
    one of several.
@@ -1460,6 +1555,10 @@ with the agent still running and its scrollback intact; then kill the terminal a
 neither dies nor restarts."* Plus: the opening prompt appears exactly once in the log across the
 whole sequence, and `exit_code` is recorded on completion.
 
+**Then kill the supervisor and assert nothing restarts it.** Draft 4's sequence passes unchanged
+under `Restart=always`, so it never tested §4.4's `Restart=no` — the guarantee the whole
+no-replay argument rests on.
+
 ### 18.2 Reconciliation
 
 Each of these is a separate test, and the last two are the ones draft 1 would have failed:
@@ -1468,8 +1567,9 @@ Each of these is a separate test, and the last two are the ones draft 1 would ha
    `unit_event` naming the reconciler and the deciding check id.
 2. Reboot with a local unit running; check `L1` resolves it.
 3. Restore a registry backup; every row is re-probed.
-4. Make a remote host unreachable; its rows are marked **stale, not lost**, and `last_probe_at`
-   advances even though `state` does not.
+4. Make a remote host unreachable; its rows are marked **stale, not lost**, `last_probe_at`
+   advances, and — the assertion that matters — **`last_successful_probe_at` does *not*.** Without
+   that second clause the test passes on the single-column design this split was meant to fix.
 5. **Reboot the laptop with a remote job still running on a reachable host.** The job must remain
    `running`, and **`R6`** must be the deciding check — `R4` is the remote-reboot case and concludes
    `lost`. This is the regression test for the draft 1 defect in which the local `boot_id` was
@@ -1481,10 +1581,12 @@ Each of these is a separate test, and the last two are the ones draft 1 would ha
 7. **A live supervisor that does not answer.** Make a running unit's socket unresponsive while the
    process stays alive. `L5` marks it *unreachable supervisor*, the row stays `running`, and **the
    socket is not unlinked** — reconcile may remove a socket only after concluding its unit is dead.
-8. **A supervisor whose row is terminal.** Restore a registry backup older than a unit's completion
-   while its supervisor still runs. The row **stays terminal**, it is never written back to
-   `running`, the conflict is reported with both timestamps, and the socket is unlinked only after
-   the supervisor exits.
+8. **A supervisor whose row is terminal.** The setup has to produce that pairing directly — a
+   backup taken *before* completion restores a `running` row, not a terminal one, so draft 4's
+   description could not create the state it tested. Instead: let a unit reach `terminal`, then
+   start a supervisor process for it that answers `describe` (a stale supervisor that outlived its
+   own terminal write). The row **stays terminal**, is never written back to `running`, the
+   conflict is reported with both timestamps, and the socket is unlinked only after it exits.
 9. **Two reconcilers at once.** Run two passes concurrently over the same rows; the advisory lock
    serializes them, and a remote result imported twice produces **one** artifact row per artifact,
    not two.
@@ -1508,10 +1610,13 @@ The four cases draft 2 could not distinguish:
    After `launch_deadline` it becomes `terminal`/`launch_failed` — again not `lost`, because
    nothing was ever confirmed running.
 4. **Cancellation during handoff.** Set `cancel_requested_at` between the `starting` write and the
-   acknowledgement. The unit reaches `terminal`/`cancelled`, **no agent process is ever created**,
-   and no signal is sent. Assert the agent binary never ran, not merely that the row is right.
+   acknowledgement. The unit reaches `terminal`/`cancelled` and no signal is sent. **Assert the
+   agent binary never ran** — via a test adapter that records its own invocation to a file — not
+   merely that the row is right. A supervisor that `exec`s and then checks would pass a row-only
+   assertion while violating §4.5 step 3.
 5. **Superseded launch.** Run a supervisor carrying a stale `launch_id`. It exits without writing
-   anything; the row's `launch_ack_at` stays null and its `supervisor_pid` is unchanged.
+   anything, the row's `launch_ack_at` stays null, `supervisor_pid` is unchanged, and — again by
+   the adapter's own record — **the agent binary never ran**.
 6. **The deadline race.** Hold a reconciler between reading a past-deadline row and writing its
    `launch_failed`, and let the supervisor acknowledge in the gap. **Exactly one wins**, and the
    outcome is consistent either way: if the supervisor won, the row is `running` and the reconciler
@@ -1523,7 +1628,7 @@ The four cases draft 2 could not distinguish:
 
 Run against a fresh database built from §5.2's DDL, since these are the rules an implementer would
 otherwise have to remember: a `job` in `waiting` is rejected; a second `schema_version` row is
-rejected; an `actor` outside the five is rejected; `state='terminal'` with a null `outcome` or null
+rejected (with `UNIQUE constraint failed`, not `CHECK` — draft 4's test named the wrong error); an `actor` outside the five is rejected; `state='terminal'` with a null `outcome` or null
 `ended_at` is rejected; `waiting` without a `waiting_source` is rejected. Each must fail with a
 `CHECK constraint failed`, not merely be avoided by convention.
 
@@ -1538,8 +1643,10 @@ allocated again. Draft 3 failed this at the first `DELETE`.
    reconcile. It imports the terminal result: `outcome = 'completed'`, the real `exit_code`, real
    timestamps. **This is the regression test for the draft 2 defect in which the successful path
    was the one that lost its result.**
-2. **Remote crash with no result.** Kill the remote host mid-run. With no result record and no
-   process, the unit is `lost` — correct, because nothing knows what happened.
+2. **Remote crash with no result.** Kill the agent **process** on a still-reachable host, leaving
+   no result record. `R5` fires and the unit is `lost` — correct, because nothing knows what
+   happened. Killing the *host* instead tests `R1`, which must yield **unreachable, never `lost`**
+   (test 4 above); draft 4 conflated the two and left `R5` with no test at all.
 3. **Partial result write.** Truncate `.cdl-result.json` mid-file, and separately corrupt its
    `record_sha256`. Both are treated as **absent**: the unit resolves to `lost`, never
    `completed`, and `unit_event.detail` names the verification failure.
@@ -1577,8 +1684,9 @@ it deletes the block first, in the same transaction (§6.1).
 ### 18.4 Attach arbitration
 
 Attach two clients with **different terminal sizes**. The second is an observer, its keystrokes are
-discarded, and `TIOCSWINSZ` follows the writer alone — the agent's rendered width does not change
-when the observer's window is resized. `--takeover` transfers the writer role and **both** clients
+discarded, and `TIOCSWINSZ` follows the writer alone. **The agent reports its own width** — the
+test adapter prints `COLUMNS` on demand — because asserting that cdl *sent* no resize does not
+establish that the agent saw none. `--takeover` transfers the writer role and **both** clients
 are told in-band. When the writer detaches, the observer is promoted and told (§4.3.1).
 
 ### 18.5 Port allocation
@@ -1614,7 +1722,28 @@ does not claim. A unit whose spend is estimated is **not** hard-stopped, and its
 shows `~`. Budget arithmetic is exercised in integer micros with a value chosen to be
 unrepresentable in binary floating point (e.g. `$0.10`), asserting no drift over many increments.
 
-### 18.8 Confirm the reported values
+### 18.8 The claims draft 4 asserted and never tested
+
+A cold review of the suite found these guarantees stated in the design with nothing exercising
+them. Each is a test, not a note:
+
+| Claim | Test |
+|-|-|
+| §4.2 step 5 / §7.5 — a lease is released on **normal** completion | Run a local-provider unit to completion; `gpu_lease.released_at` is set and the live-lease sum returns to its prior value. This is the draft-3 defect the spec names; nothing checked it. |
+| §3.1, §9.3 — `running ⇄ waiting` | Drive the test adapter to emit its waiting pattern, then to produce output. The unit enters `waiting` with `waiting_source='adapter'` and returns to `running`. Separately, block it silently past the idle threshold: `waiting_source='idle'`. |
+| §3.1 — live cancellation | Cancel a `running` unit. It passes through `stopping`, gets `SIGTERM`, and on a unit that ignores `SIGTERM` is `SIGKILL`ed after the grace period, reaching `terminal`/`cancelled`. Only *queued* cancellation was tested. |
+| §3.4 — only the owner writes | With a unit `running`, have the admission controller attempt each of its transitions. Every one affects **zero rows** (§4.5's guards) and no `unit_event` appears. |
+| §3.4 — `SQLITE_BUSY` surfaces | Hold a write transaction open past the `busy_timeout` while another actor attempts a state write. The second **fails loudly**; it must never skip the write, which would break §3.5 invariant 1. |
+| §19.4 — launch idempotency | Drop the ssh connection after the remote process starts but before the pid is read back. Re-run the launch: it adopts the existing process via the marker and **starts nothing new**; exactly one agent process exists on the remote host. |
+| §20.3 — argv redaction | Launch an adapter that takes a key as an argument. `launch_argv` contains `«redacted:…»` and **not** the key; `cdl doctor`'s scan reports nothing. Then deliberately mis-declare the secret position and confirm `cdl doctor` **does** report it. |
+| §20.2 — log sanitizing | Have the adapter emit a window-title escape sequence. `cdl agent logs` strips it, `--raw` does not, and the on-disk log retains the original bytes. |
+| §20.1 — rotation | Emit more than the rotation threshold; segments appear, the agent keeps running, and a log write failure does not kill it. |
+| §11.3 — device reconciliation | Present a lease table that disagrees with `nvidia-smi` by more than the margin. The **measurement** decides admission and the discrepancy is recorded. |
+| §11.4 — thermal denial | A gate returning `deny(reason)` produces `launch_failed` with the reason, and **no process is created**. |
+| §13.2 — daily ceiling | At the hard stop, new admissions are refused and **running units are not killed** (§13.2 is explicit about that trade). |
+| §14 — limits queue rather than fail | Exceed each limit; units sit in `queued` with a populated `queued_reason` and start when capacity frees. |
+
+### 18.9 Confirm the reported values
 
 The overview marks the `systemd-oomd` defaults and the AppArmor/bubblewrap interaction *reported,
 not reproduced*. Before either is relied on, both are to be measured on the target and the result
@@ -1727,6 +1856,12 @@ mode 0600, containing:
 | `started_at`, `ended_at` | Runtime, which cannot be reconstructed locally once the process is gone. |
 | `artifacts[]` — path, bytes, `sha256` | The manifest §19.8 fetches against. Digests are computed on the remote, where the bytes are. |
 | `record_sha256` | A digest over the rest of the record, so a partial write is detectable rather than plausible. |
+
+**Importing it is idempotent, not merely deduplicated.** `R3` may run twice — two reconcilers, or
+one retried after a crash between the import and the commit — so every insert derived from this
+record uses `INSERT … ON CONFLICT DO NOTHING` against the uniqueness indexes in §5.2. A bare
+`INSERT` would raise `UNIQUE constraint failed` and abort the whole `R3` transaction, so the
+second attempt would fail to import a result the first had already half-written.
 
 **It is written atomically**: to a temporary file in the same directory, `fsync`, then `rename`.
 A `rename` within one filesystem is atomic, so a reader sees either no record or a whole one —
@@ -1856,7 +1991,7 @@ passed only once, during a single transition, not from its being readable afterw
 concrete mechanism, since "systemd will handle it" is where this kind of design usually stops:
 
 ```
-systemd-run --user --unit=cdl-agent@<unit-id> --slice=cdl-agent-<unit-id>.slice \
+systemd-run --user --unit=cdl-agent-<unit-id> --slice=cdl-agent-<unit-id>.slice \
   --property=Restart=no --property=MemoryHigh=<n> --property=MemoryMax=<n> \
   --property=ManagedOOMPreference=avoid --collect \
   /usr/lib/cdl/cdl-agent-supervisor --unit-id <unit-id> --launch-id <launch-id>
@@ -2031,6 +2166,40 @@ blocker was found.
 | §4.1's shipped template contradicted §20.5's `systemd-run`, with colliding unit names | §4.1 defers to §20.5 |
 | A filesystem removal sat inside a "transaction" that cannot roll back | §6.1: atomic rename first, then the transaction, then cleanup |
 | Nine cross-references resolved to the wrong section after renumbering | Fixed; see the note on checker limits in `CLAUDE.md` |
+
+### 22.5 Cold review of draft 4 — three agents
+
+Three cold agents, one on the whole document, one on the sections draft 4 rewrote, one on the
+acceptance tests alone. **35 findings, one blocking.** All were verified here — in `sqlite3`, in
+`git`, or against the text — before anything was changed.
+
+**The blocking one was mine, introduced by draft 4's own fix.** To make §15.2's promise true I
+added `CHECK ((state='waiting') = (waiting_source IS NOT NULL))`, which made `waiting` a **trap
+state**: every exit from it — to `running`, to `stopping`, to `terminal` — failed the constraint,
+because nothing cleared the column. Reproduced on all three transitions. The constraint is gone;
+`waiting_source` is a detector record, read only while the unit is waiting.
+
+The findings that were not simply mechanical:
+
+| Finding | Resolved in |
+|-|-|
+| **`waiting` was a trap state** — no transition could leave it | §5.2, constraint removed |
+| **Timestamps were compared as free-form TEXT.** `'…T10:00:00Z' < '…T10:00:00.5Z'` is **0**; `'2026-09-01 10:00:00' < '…T09:00:00Z'` is **1**. §4.5's deadline is such a comparison | §5.2 pins one format and a `GLOB` `CHECK` enforces it on `launch_deadline` |
+| **Only two of four writes into the launch window were compare-and-swap.** Admission's spawn-failure write could overwrite a `running` row after acknowledgement | §4.5: all four carry `launch_ack_at IS NULL` |
+| **A backwards clock stranded a row in `L0` for ever**, holding a lease and a slot | §4.5: a clock-independent `created_at` bound |
+| **`ON DELETE SET NULL` — draft 4's own blocker fix — erased provenance.** After `worktree rm`, a terminal unit no longer recorded which branch it worked on | §5.2 denormalises `worktree_path` and `branch` onto the unit |
+| **`--rebuild` could not insert a row into a fresh database** (`FOREIGN KEY constraint failed` on `worktree_id`) | §7.3.1: rebuilt rows carry null references and restore the facts instead |
+| **Acknowledged-then-crashed-before-`exec` was written `lost`**, which §3.2 reserves for a unit confirmed running | §7.2 `L0″` → `launch_failed` |
+| **§6.1's crash recovery depended on rows that step 4 deletes**, so a crash between 4 and 5 left git refusing the path for ever (*"missing but already registered worktree"*) | §6.1: `gc` scans for trash by name and prunes before reading any row |
+| **"The rename makes it invisible to git" was false** — `git worktree list` shows it `prunable` — and the claimed impossible state does occur between steps 3 and 4 | §6.1 and a new §7.6 row for the interrupted removal |
+| **`R2` concluded nothing when the marker was simply absent**, leaving the row `running` for ever | §7.2 `R2′` |
+| **Both idempotence indexes were wrong.** `artifact_identity` keyed on a column that is NULL for local jobs; `spend_import` both admitted duplicate imports and rejected genuine records sharing a timestamp | §5.2: key on `artifact.name` and on `spend_ledger.remote_ref` |
+| **§7.6 tier 1 still removed a silent socket**, contradicting `L5` one section above | §7.6 |
+| **A budget stop recorded `cancelled`**, indistinguishable from an operator's cancel | New `budget_exceeded` outcome |
+| **§16 claimed content the frozen overview routes elsewhere.** Overview §7.1 assigns the llama-swap rationale to `cdl-first-boot-and-environment` | §16 declares the divergence and narrows the claim to serving topology |
+| **T4a was cited as overview §12**, which is *Session and display*; it is overview §5 | §12.2 |
+| Four spellings of the systemd unit name; `attach`'s documented default contradicted §4.3.1 | §4.1/§7.3.1/§7.6/§20.5; §15.1 |
+| **The acceptance suite was inadequate.** Several tests passed on a broken implementation, one had an impossible setup, and fourteen stated guarantees had no test at all | §18 throughout; new §18.8 |
 
 ---
 
