@@ -1,6 +1,7 @@
 # `cdl-agent-lifecycle` — Component Specification
 
-**Status:** draft 1, for review.
+**Status:** draft 2. Draft 1 was reviewed 2026-09-02; the ten findings and their resolutions are
+recorded in §20.
 **Commissioned by:** `docs/superpowers/specs/2026-08-31-cdl-design.md` ("the overview") §7, which says of this
 component: *"Write this one first — it holds the differentiating functionality and drives M1."*
 **Design decisions taken during this spec:** `notes/2026-09-01-session-03-agent-lifecycle-design.md`
@@ -44,11 +45,16 @@ Stated so the boundary is not re-litigated in a later spec:
 
 ### 1.3 Delivery slicing
 
-Per DA1 this document specifies the **whole** commissioning brief. Implementation is sliced: the
-first executable slice is **one local interactive agent**, sufficient to run spike 2 (§18.1). The
-schema, state machine and backend interface are nevertheless designed against all three D28
+Per DA1 this document specifies the **whole** commissioning brief. **Implementation is sliced, and
+§20 is the order**: the first executable slice is one local interactive agent against a test
+adapter, with remote execution, controlled egress, GPU admission and spend accounting deliberately
+held back until the local core survives its failure tests.
+
+The schema, state machine and backend interface are nevertheless designed against all three D28
 locations, because those are the expensive things to change later and D28 is *"the single most
-consequential requirement in the document."*
+consequential requirement in the document."* Specifying a layer and shipping it are different
+commitments, and §20 marks which is which — draft 1 specified some layers at a depth that implied
+they were ready to build, which they were not.
 
 ---
 
@@ -112,7 +118,7 @@ Meaningful only in `terminal`.
 |-|-|
 | `completed` | The unit's process exited `0`. |
 | `failed` | Exited non-zero. The exit code is recorded separately. |
-| `launch_failed` | Never reached `running`: worktree, port, admission, sandbox or `exec` error. |
+| `launch_failed` | Never reached `running`. Written by **admission** for pre-handoff failures (unsupported adapter/provider pair, thermal denial, sandbox precheck, port exhaustion, concurrency-permanent refusal) and by the **supervisor** for post-handoff ones (worktree, PTY, sandbox construction, `exec`). §3.4 says which. |
 | `cancelled` | Terminated at the operator's request. |
 | `lost` | Reconciliation found no live process for a row that claimed to be live. |
 
@@ -134,25 +140,51 @@ This is what allows `cdl status` to show local agents and remote jobs in one tab
 ### 3.4 Who may write a transition
 
 This is the rule that keeps ~16 concurrent writers from corrupting the registry, and it answers
-"SQLite ownership":
+"SQLite ownership". Draft 1 stated it as *"only a unit's own supervisor writes that unit's
+`starting` … rows"* and then assigned `queued → starting` to the admission controller in the very
+next table. It also left a `queued` unit's cancellation to a supervisor that does not exist yet.
+The correct invariant is not *one actor* but **one owner at a time**:
 
-> **Only a unit's own supervisor writes that unit's `starting`, `running`, `waiting` and `terminal`
-> rows. Every other actor *requests* a transition; none performs one.**
+> **Every row has exactly one owning actor at any instant. Only the owner writes it. Ownership
+> transfers at three defined points, and each transfer is itself a single write.**
 
-| Transition | Written by |
-|-|-|
-| → `queued` | `cdl agent new` / `cdl job submit` (the row's creator) |
-| `queued` → `starting` | The admission controller — it is the only actor holding the leases |
-| `starting` → `running` / `terminal(launch_failed)` | The supervisor |
-| `running` ⇄ `waiting` | The supervisor, on its adapter's detector |
-| any live → `stopping` | The supervisor, having observed a cancel-request flag |
-| any live → `terminal` | The supervisor |
-| any live → `terminal(lost)` | **The reconciler — the single exception**, and only for rows whose supervisor is *provably* absent (§7) |
+| Phase | Owner | May write |
+|-|-|-|
+| From row insert | **Creator** (`cdl agent new` / `cdl job submit`) | The initial `queued` row. Nothing else, ever. |
+| From insert commit | **Admission controller** | `queued → starting`, `queued → terminal(launch_failed)`, `queued → terminal(cancelled)` |
+| From the `starting` write | **Supervisor** | `starting → running`, `starting → terminal(launch_failed)`, `running ⇄ waiting`, live → `stopping`, live → `terminal` |
+| Only when the owner is provably absent | **Reconciler** | → `terminal(lost)` (§7) |
 
-`cdl agent cancel` therefore does not kill anything. It sets `cancel_requested_at` and returns; the
-supervisor observes it and drives the transition. Each row consequently has exactly one writer at
-any moment, so SQLite's WAL mode provides durability for a write pattern that is already
-conflict-free.
+**The handoff is the `starting` write.** The admission controller grants the leases, writes
+`queued → starting`, and *then* starts the systemd unit — the grants and the state change in one
+transaction, so "admitted" is durable before anything is spawned. From that commit the supervisor
+owns the row; the admission controller never touches it again. A row left in `starting` with no
+systemd unit (admission crashed between the commit and the spawn) is not ambiguous: §7.2's local
+probe finds no unit and resolves it to `lost`.
+
+**Cancellation is a request, never a transition.** `cdl agent cancel` sets `cancel_requested_at`
+and returns; it kills nothing and transitions nothing. **Whichever actor owns the row acts on it**,
+which is what makes queued cancellation work:
+
+- A **`queued`** unit is cancelled by the admission controller, which owns it, writing
+  `queued → terminal(cancelled)` directly. No supervisor is ever started. There is no process to
+  signal and no grace period to serve, so `stopping` is skipped — it exists to describe a
+  `SIGTERM` in flight.
+- A **live** unit is cancelled by its supervisor, which observes the flag and drives
+  `stopping → terminal(cancelled)`.
+
+Each row therefore has exactly one writer at any moment, so SQLite's WAL mode provides durability
+for a write pattern that is already conflict-free.
+
+### 3.5 Two invariants the schema enforces
+
+Stated here because they are what the ownership rule is *for*, and enforced in §5.2 rather than
+left to application discipline:
+
+1. **A state change and its event row are one transaction.** A `unit.state` that advanced without
+   a matching `unit_event` makes the event log lie about history, and §7 reads that history.
+2. **`outcome` is non-null if and only if `state = 'terminal'`.** A terminal row with no outcome,
+   or a live row carrying one, are both unrepresentable rather than merely discouraged.
 
 ---
 
@@ -200,19 +232,44 @@ exactly when the agent finishes — the opposite of what a supervisory system ne
 
 `cdl agent attach <id>` is a thin client:
 
-1. Connects to the unit's socket. **More than one client may attach at once**; all receive the same
-   stream, and any may write.
+1. Connects to the unit's socket. **More than one client may attach at once, but exactly one is
+   the writer** (§4.3.1). Every client receives the same output stream.
 2. The supervisor sends a **replay window** — the last *N* bytes of the log (default 64 KiB,
    configurable) — so the client's terminal shows recent context immediately.
 3. The client puts its own terminal in raw mode, forwards stdin to the socket, and writes socket
    output to stdout.
-4. On `SIGWINCH` the client sends its new dimensions; the supervisor applies `TIOCSWINSZ` to the
-   master. The supervisor forwards **bytes only**: when the agent's terminal is in canonical mode
-   the kernel's line discipline turns `^C` into `SIGINT` itself, and when the agent puts its
-   terminal in raw mode it handles those bytes directly. Either way, signal translation is **not**
-   the supervisor's job.
+4. On `SIGWINCH` the client sends its new dimensions. **The supervisor applies `TIOCSWINSZ` only
+   from the writer** (§4.3.1). The supervisor forwards **bytes only**: when the agent's terminal is
+   in canonical mode the kernel's line discipline turns `^C` into `SIGINT` itself, and when the
+   agent puts its terminal in raw mode it handles those bytes directly. Either way, signal
+   translation is **not** the supervisor's job.
 5. Detach is a client-side escape sequence and closes only the socket. **The supervisor never
    changes state on client disconnect.**
+
+#### 4.3.1 One writer, many observers
+
+Draft 1 let every attached client write and resize. Both halves are defects, and the second is the
+worse one: two clients with different window sizes produce a `TIOCSWINSZ` fight in which the agent's
+rendering is wrong for at least one of them continuously, and there is no error anywhere to notice.
+Interleaved keystrokes from two writers corrupt input in a way neither operator can attribute.
+
+The arbitration:
+
+- The **first client to attach becomes the writer.** Later clients attach as **observers**: they
+  receive the full output stream and their input is discarded, not queued.
+- **The writer's dimensions alone drive `TIOCSWINSZ`.** An observer whose terminal is smaller
+  renders the writer's geometry and may clip; this is visible to the operator, unlike a size fight.
+  `cdl agent attach` prints the writer's dimensions on connect so a mismatch is not a mystery.
+- **Takeover is explicit and always available**: `cdl agent attach --takeover <id>`, or the escape
+  sequence's takeover key. The supervisor demotes the previous writer to observer and **tells both
+  clients, in-band**, which one now holds the terminal. Silent transfer would be worse than a fight.
+- **Releasing is implicit on disconnect.** When the writer detaches, the longest-attached observer
+  is promoted and told. If no observer remains the unit has no writer, which is normal: the agent
+  keeps running and logging regardless, per §4.2.
+
+This is arbitration, not access control. Every client is the same uid — the socket lives in
+`$XDG_RUNTIME_DIR` at mode 0600 — so the mechanism exists to stop an operator fighting themselves
+across two terminals, which with ~16 units is the likely case.
 
 Because the supervisor holds the master for the unit's whole life, killing the terminal — or every
 terminal — cannot `SIGHUP` the agent. That is spike 2's *"kill the terminal and confirm the agent
@@ -278,6 +335,16 @@ CREATE TABLE unit (
     backend             TEXT NOT NULL CHECK (backend IN ('local','ssh','slurm','hfjobs')),
     remote_id           TEXT,                      -- queue id on a remote backend
     remote_host         TEXT,
+    remote_dir          TEXT,                      -- remote working directory (§19)
+    remote_pid          INTEGER,                   -- remote-side supervisor pid
+    remote_boot_id      TEXT,                      -- boot id OF THE REMOTE HOST; never the local one
+
+    -- Probe state. Written by every reconcile attempt, including failed ones (§7.2).
+    last_probe_at       TEXT,
+    probe_status        TEXT CHECK (probe_status IN ('alive','dead','unreachable')),
+
+    queued_reason       TEXT,                      -- what a queued unit is waiting for (§14, §15.2)
+    egress_allow        TEXT,                      -- JSON array of permitted hostnames (§12.2)
 
     adapter             TEXT NOT NULL,             -- 'claude-code' | 'codex' | 'gemini' | 'opencode'
     provider            TEXT NOT NULL,             -- 'anthropic' | 'openai' | ... | 'local'
@@ -297,8 +364,11 @@ CREATE TABLE unit (
     systemd_unit        TEXT,
     boot_id             TEXT,                      -- /proc/sys/kernel/random/boot_id at start
 
-    budget_usd          REAL,                      -- per-unit declared budget (D33)
-    spend_usd           REAL NOT NULL DEFAULT 0,
+    -- Money is INTEGER MICROS (1 USD = 1_000_000). Never REAL: binary floating point
+    -- cannot represent a cent exactly, and a budget ceiling compared with `>=` against an
+    -- accumulated sum of REALs drifts in a way that is invisible until it matters.
+    budget_micros       INTEGER,                   -- per-unit declared budget (D33)
+    spend_micros        INTEGER NOT NULL DEFAULT 0,
     tokens_in           INTEGER NOT NULL DEFAULT 0,
     tokens_out          INTEGER NOT NULL DEFAULT 0,
     spend_is_estimated  INTEGER NOT NULL DEFAULT 0,-- see §13.3
@@ -307,7 +377,11 @@ CREATE TABLE unit (
     cancel_requested_at TEXT,
     created_at          TEXT NOT NULL,
     started_at          TEXT,
-    ended_at            TEXT
+    ended_at            TEXT,
+
+    -- §3.5 invariant 2, enforced rather than merely documented.
+    CHECK ((state = 'terminal') = (outcome IS NOT NULL)),
+    CHECK ((state = 'terminal') = (ended_at IS NOT NULL))
 );
 
 CREATE INDEX unit_attention  ON unit(state) WHERE state = 'waiting';
@@ -331,18 +405,23 @@ CREATE TABLE worktree (
     branch      TEXT NOT NULL,
     path        TEXT NOT NULL UNIQUE,
     created_at  TEXT NOT NULL,
-    released_at TEXT,
-    UNIQUE (repo_path, branch)
+    released_at TEXT
 );
+
+-- Active-only uniqueness. A permanent UNIQUE(repo_path, branch) -- which draft 1 had -- makes a
+-- branch permanently unusable once its worktree is released, because the released row keeps
+-- occupying the constraint. Git's own guarantee is scoped to checked-out worktrees, so this
+-- index is scoped the same way (§6).
+CREATE UNIQUE INDEX worktree_active ON worktree(repo_path, branch) WHERE released_at IS NULL;
 
 CREATE TABLE port_block (
     id          TEXT PRIMARY KEY,
-    base_port   INTEGER NOT NULL UNIQUE,
-    size        INTEGER NOT NULL,
-    owner_unit  TEXT REFERENCES unit(id),
-    preferred   INTEGER NOT NULL,   -- 1 if the hash's first choice was free
-    created_at  TEXT NOT NULL,
-    released_at TEXT
+    base_port       INTEGER NOT NULL UNIQUE,
+    size            INTEGER NOT NULL,
+    owner_worktree  TEXT NOT NULL REFERENCES worktree(id),  -- NOT the unit: see §8
+    preferred       INTEGER NOT NULL,   -- 1 if the hash's first choice was free
+    created_at      TEXT NOT NULL,
+    released_at     TEXT
 );
 
 CREATE TABLE gpu_lease (
@@ -353,18 +432,38 @@ CREATE TABLE gpu_lease (
     released_at TEXT
 );
 
-CREATE TABLE spend_ledger (           -- append-only; unit.spend_usd is a cached rollup
+CREATE TABLE spend_ledger (           -- append-only; unit.spend_micros is a cached rollup
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     unit_id     TEXT NOT NULL REFERENCES unit(id),
     at          TEXT NOT NULL,
     provider    TEXT NOT NULL,
     tokens_in   INTEGER,
     tokens_out  INTEGER,
-    usd         REAL,
+    micros      INTEGER,          -- USD micros; see the note on unit.spend_micros
     estimated   INTEGER NOT NULL DEFAULT 0,
     source      TEXT NOT NULL     -- 'adapter' | 'provider-api' | 'price-table'
 );
+
+-- Artifacts produced by a job (§15.1 `cdl job artifacts`, §19.6). Draft 1 offered the command
+-- with no table behind it.
+CREATE TABLE artifact (
+    id          TEXT PRIMARY KEY,
+    unit_id     TEXT NOT NULL REFERENCES unit(id),
+    kind        TEXT NOT NULL CHECK (kind IN ('file','dir','log')),
+    remote_path TEXT,             -- where it was produced, if a remote backend
+    local_path  TEXT,             -- where it was retrieved to, once fetched
+    bytes       INTEGER,
+    sha256      TEXT,
+    fetched_at  TEXT,
+    created_at  TEXT NOT NULL
+);
+CREATE INDEX artifact_unit ON artifact(unit_id);
 ```
+
+**Every state change writes both tables in one transaction** (§3.5 invariant 1). There is no code
+path that updates `unit.state` alone: a row whose state advanced without a corresponding
+`unit_event` makes the event log lie about history, and §7 reads that history to decide what to do
+with a unit it cannot see.
 
 **Why `unit_event` exists.** The `unit` row holds current state; the event log holds how it got
 there, including which actor wrote each transition. Reconciliation, spike-2 evidence and
@@ -394,8 +493,17 @@ On `SQLITE_CORRUPT`, `cdl` does not attempt automatic repair. It:
 3. Creates a fresh database at the current schema version.
 4. Reports how many units were lost from view, and that **their logs still exist** — logs are files
    on disk and do not depend on the registry.
-5. Directs the operator to `cdl reconcile`, which will discover any still-running supervisors and
-   re-adopt them (§7.3).
+5. Directs the operator to `cdl reconcile --rebuild`, which discovers still-running supervisors
+   **without reading the registry** — from `cdl-agent@*.service` units and from the runtime sockets
+   — `describe`s each, and rebuilds its row from the launch manifest (§7.3.1).
+
+**What `--rebuild` does not recover, stated plainly.** A rebuilt row carries the unit's creation
+facts and its current state. Its **spend ledger and event history are gone**, because both lived
+only in the destroyed database. Rebuilt rows are therefore marked `recovered`, their `spend_micros`
+reset to 0 with `spend_is_estimated` set, and §13.2's daily ceiling is understated for the rest of
+that day. A unit whose supervisor is *also* gone cannot be rebuilt at all: nothing on the machine
+knows it existed except its log file and manifest, which `--rebuild` lists for the operator as
+**orphaned artifacts** rather than resurrecting into rows that would claim a state nobody verified.
 
 ### 5.5 Backup treatment
 
@@ -418,17 +526,28 @@ not independently reproduced*: agents sharing one checkout landed 24 of 100 comm
 `cdl worktree new <branch>` is the seeding hook, because `git worktree add` carries no untracked or
 gitignored files, so a fresh workspace has no venv, no `node_modules`, no `.env`. It:
 
-1. Creates the worktree and its branch. Git enforces uniqueness — one branch cannot be checked out
-   twice — so branch collisions are impossible by construction rather than by policy.
+1. Creates the worktree and its branch. Git enforces uniqueness among **checked-out** worktrees —
+   one branch cannot be checked out twice — so collisions between *live* worktrees are impossible by
+   construction rather than by policy. That guarantee ends at release: once a worktree is removed,
+   git will happily check the branch out again, and §5.2's uniqueness index is scoped to match
+   (active rows only). A permanent constraint would have made a released branch permanently
+   unusable.
 2. Creates the venv with `uv`, so packages hardlink from one shared cache.
 3. Reflink-copies large gitignored directories (`cp --reflink=auto`, free on btrfs).
-4. Allocates a port block (§8).
+4. Allocates a port block, **owned by the worktree** (§8).
 5. Records the row in `worktree`.
 
 **Release is explicit, and worktrees outlive their agent by default.** When a unit reaches
-`terminal`, its worktree is *not* removed: the work is usually the point. `released_at` is set, and
-`cdl worktree gc` removes released worktrees older than a configurable age, refusing any with
-uncommitted changes unless `--force` is given.
+`terminal`, its worktree is *not* removed: the work is usually the point. `released_at` is set by
+`cdl worktree release`, and `cdl worktree gc` removes released worktrees older than a configurable
+age, refusing any with uncommitted changes unless `--force` is given. **`gc` deletes the `worktree`
+row**, which is what frees the branch for reuse under the active-only index (§5.2).
+
+**The port block is released with the worktree, not with the unit** (§8), so a branch keeps the same
+dev-server ports across successive agents working on it. Draft 1 allocated the block at worktree
+creation but released it when the *unit* terminated, which meant the second agent on a branch could
+be handed a different block than the first while the branch's own tooling still pointed at the
+old one.
 
 ---
 
@@ -440,33 +559,84 @@ Rows claiming `starting`, `running`, `waiting` or `stopping` assert that a proce
 reboot, an OOM kill, a supervisor crash or a registry restore, that assertion may be false, and
 nothing in the row itself reveals it.
 
-### 7.2 The probe
+### 7.2 The probe is dispatched on `backend` first
+
+Draft 1 ran one ordered checklist over every row, beginning with *"`boot_id` differs from the
+current boot → **Dead**"*. That is **unsafe for anything but a local unit**: `boot_id` is
+`/proc/sys/kernel/random/boot_id` *on the Tensorbook*, and a job running on the lab GPU host has no
+relationship to it. Rebooting the laptop would have marked every live remote job `lost` and released
+its leases — the precise fabrication §7.2 elsewhere forbids. **The identity of a process is a fact
+about the machine it runs on**, so the probe dispatches on `backend` before it checks anything.
 
 `cdl reconcile` runs at login (via a `systemd --user` unit ordered after the registry is available)
-and on demand. For each non-`terminal` row, in order, stopping at the first definite answer:
+and on demand. For each non-`terminal` row: select the ladder by `backend`, then take the first
+definite answer.
+
+**`backend = 'local'`** — the local boot is the right frame of reference:
 
 | # | Check | Conclusion |
 |-|-|-|
-| 1 | `boot_id` differs from the current boot | **Dead.** No process from a previous boot survives. |
-| 2 | `backend = 'local'` and `systemctl --user is-active <unit>` is not `active` | **Dead.** |
-| 3 | `supervisor_pid` absent, or present but not a `cdl-agent-supervisor` with the matching unit id in its cmdline | **Dead.** PID reuse is why the cmdline is checked, not just existence. |
-| 4 | The unit's socket exists and answers a ping | **Alive.** Re-adopt (§7.3). |
-| 5 | `backend = 'ssh'` and the remote probe reports no such process | **Dead.** |
-| 6 | Remote host unreachable | **Unknown** — see below. |
+| L1 | `boot_id` differs from the current boot | **Dead.** No local process from a previous boot survives. |
+| L2 | `systemctl --user is-active <unit>` is not `active` | **Dead.** |
+| L3 | `supervisor_pid` absent, or present but not a `cdl-agent-supervisor` with the matching unit id in its cmdline | **Dead.** PID reuse is why the cmdline is checked, not just existence. |
+| L4 | The unit's socket exists and answers `describe` (§7.3) | **Alive.** Re-adopt. |
+
+**`backend = 'ssh'`** — the local boot is irrelevant; only the remote host's frame counts:
+
+| # | Check | Conclusion |
+|-|-|-|
+| R1 | Host unreachable | **Unknown.** Record the attempt; leave `state` untouched. Never `lost`. |
+| R2 | Reachable, and the remote boot id differs from `remote_boot_id` on the row | **Dead.** The *remote* machine rebooted. |
+| R3 | Reachable, same boot, and no process matching `remote_pid` **and** the unit id in its cmdline | **Dead.** |
+| R4 | Reachable, same boot, process matches | **Alive.** Refresh `last_probe_at`. |
+
+R2 is the exact analogue of L1, against the boot id that actually governs the process. It is why
+§5.2 stores `remote_boot_id` as a distinct column: reusing `boot_id` for both is how draft 1's bug
+would grow back.
 
 Rows concluded dead are written `terminal` / `lost`, with a `unit_event` recording `actor =
-'reconciler'` and the check number that decided it.
+'reconciler'` and the check id (`L2`, `R3`, …) that decided it. Every probe attempt — including a
+failed one — writes `last_probe_at` and `probe_status`, so §15.2's staleness display has a source.
 
 **An unreachable remote host is not evidence of death.** Such rows are left in place, their
 `state` untouched, and `cdl status` marks them *stale* with the age of the last successful probe. A
 network partition must never be allowed to fabricate a `lost` outcome, because that would release
 the unit's GPU lease and port block while the work is still running.
 
-### 7.3 Re-adoption
+### 7.3 Re-adoption, and the `describe` handshake
 
 A supervisor that is still alive is re-adopted rather than restarted: its socket is live, its log is
-appending, and the registry simply resumes trusting it. This is the normal case after a terminal
-crash or a logout, and it is why `linger` is enabled for the user.
+appending, and the registry resumes trusting it. This is the normal case after a terminal crash or a
+logout, and it is why `linger` is enabled for the user.
+
+Re-adoption is a **handshake, not an assumption**. The supervisor answers a `describe` request on
+its socket with its unit id, its `launch_argv` digest, its log path, its current lifecycle state and
+its start time. Reconciliation compares that to the row and re-adopts only on a match; a socket at
+the expected path answering with a *different* unit id is a stale socket, not the unit, and the row
+falls through to the next check. Authentication is `SO_PEERCRED` against the socket's own uid, which
+is sufficient because the whole system is single-user by design and the socket is mode 0600 inside
+`$XDG_RUNTIME_DIR`.
+
+#### 7.3.1 Discovery without the registry
+
+`describe` also makes re-adoption possible when the registry cannot name the rows to probe — the
+case §5.4 creates. Reconciliation can enumerate live supervisors **independently of the database**,
+from two sources that do not depend on it:
+
+1. `systemctl --user list-units 'cdl-agent@*.service'`
+2. The sockets in `$XDG_RUNTIME_DIR/cdl/*.sock`
+
+Each is `describe`d. Any supervisor that answers is real regardless of what the registry knows.
+
+**What a handshake cannot recover is the unit's creation facts** — its launch prompt, budget,
+provider, worktree and port block are not things a running supervisor can be trusted to reconstruct
+from memory after its database is gone. So the supervisor writes them **once, at launch**, to a
+sidecar manifest beside its log: `<log_path>.manifest.json`, mode 0600, containing exactly the
+immutable columns of §5.2 (never the environment *values*, per §10.3). The manifest is what makes
+§5.4's recovery work: rebuild the row from the manifest, take the live
+state from `describe`, and mark the row `recovered` in `unit_event.detail` so a rebuilt row is never
+mistaken for an original one. Mutable history — the spend ledger and the event log — is genuinely
+lost, and §5.4 says so.
 
 ### 7.4 Restored-but-stale rows
 
@@ -477,9 +647,14 @@ whose hosts are unreachable are marked stale rather than lost, per §7.2.
 
 ### 7.5 Lease release
 
-Reconciling a unit to `terminal` releases its GPU lease and port block in the **same transaction**
-as the state write. A lease outliving its unit is how a machine slowly runs out of ports and GPU
-capacity with nothing visibly wrong.
+Reconciling a unit to `terminal` releases its **GPU lease** in the same transaction as the state
+write. A lease outliving its unit is how a machine slowly runs out of GPU capacity with nothing
+visibly wrong.
+
+**The port block is not released here**, because it belongs to the worktree and outlives the unit by
+design (§6, §8). Ports are freed by `cdl worktree gc`. The two resources have genuinely different
+lifetimes: VRAM is contended right now, a port block is reserved for as long as the branch it serves
+exists.
 
 ---
 
@@ -502,8 +677,17 @@ The design is therefore:
 5. **Exhaustion is an error**, not a wrap-into-someone-else's-block: `launch_failed` with a message
    naming the range and the number of live blocks.
 
+**The block is owned by the worktree** (`port_block.owner_worktree`), allocated with it and
+released by `cdl worktree gc`. Every unit that runs in a worktree uses that worktree's block; a unit
+terminating does not free it. This is the model §6 needs: a branch's dev server keeps its port
+across a sequence of agents, and the number of live blocks tracks the number of live *branches*
+rather than the number of agent launches.
+
+A unit with no worktree — every job, and any agent launched with `--no-worktree` — gets no port
+block. Nothing in the job path binds a port.
+
 Ports are recorded, not enforced — nothing prevents a process binding outside its block. The
-registry's purpose is to stop cdl *itself* handing the same port to two units.
+registry's purpose is to stop cdl *itself* handing the same block to two worktrees.
 
 ---
 
@@ -644,12 +828,31 @@ GPU, and `gpu_lease` records who holds capacity.
 Only units whose provider is `local`. API-backed agents consume no VRAM and are limited by §14
 instead.
 
-### 11.3 Sizing
+### 11.3 Sizing, and what a lease actually is
 
 A unit declares `vram_mib`. Admission grants a lease when the sum of live leases plus the request
 fits the budget (total VRAM minus a configurable reserve for the compositor and display, default
-1024 MiB). llama-swap's model swapping is what makes a lease meaningful: a lease is permission to
-have a model resident, and the swap layer honours it.
+1024 MiB).
+
+**A lease is an admission ceiling, not a measurement, and the two will drift.** Draft 1 said the
+swap layer "honours" the lease, which overstates what cdl knows. llama-swap decides which models are
+resident and when to evict them; cdl does not sit in the inference path and cannot make VRAM appear
+or disappear. So:
+
+- The lease sum is an **upper bound cdl refuses to exceed when admitting**, and nothing stronger.
+- Two units sharing one model through llama-swap consume **one** model's VRAM while holding two
+  leases, so the sum over-counts and admission is conservative. That is the safe direction.
+- A model llama-swap has not yet evicted keeps VRAM after its lease is released, so the sum can
+  also under-count transiently. That is the unsafe direction, and it is why the reserve exists.
+
+**Admission therefore reconciles against the device before granting.** It reads actual free VRAM
+(`nvidia-smi --query-gpu=memory.free`) and grants only if *both* the lease arithmetic and the
+measured free memory admit the request. When the two disagree by more than a configurable margin,
+the measurement wins and the discrepancy is recorded.
+
+The honest summary: **cdl admits work it believes will fit, and verifies against the device rather
+than against its own bookkeeping.** An out-of-memory failure inside `llama-server` remains possible
+and surfaces as an ordinary unit failure.
 
 ### 11.4 The thermal gate
 
@@ -660,7 +863,7 @@ when conditions are unsafe**, which makes it an input to GPU admission control i
 
 Admission therefore consults a gate owned by `cdl-first-boot-and-environment`, which returns
 `allow` / `deny(reason)`. This component does not define the thresholds; it defines that they are
-consulted, that a denial produces `launch_failed` with the reason surfaced, and that the gate is
+consulted, that a denial produces `launch_failed` with the reason shown to the operator, and that the gate is
 re-consulted on every admission rather than cached.
 
 **The M0 firmware walk hardened this.** No fan control exists in firmware *or* OS on this machine,
@@ -669,10 +872,18 @@ were measured present: `intel_pstate` exposes `no_turbo` and `max_perf_pct`.
 
 ---
 
-## 12. Sandbox — closing T4a and T4e
+## 12. Sandbox — T4a and T4e
 
 The overview marks both rows **Open**, and says *"none may be closed by assertion."* This section
-closes them by mechanism.
+answers both by mechanism, and is exact about which is closed *when*:
+
+| Row | Status after this spec |
+|-|-|
+| **T4e** — agent reads other worktrees, `$HOME`, other agents' state | **Closed by §12.1, in slice 1.** The bubblewrap policy is one of the first things built, and §18.6 tests it. |
+| **T4a** — agent exfiltrates secrets over permitted egress | **Defined, and closed in slice 4** (§12.2 stage 2). Until then it is *accepted explicitly*, which is the alternative the overview itself offers: *"must define an egress policy, or this is accepted explicitly rather than by omission."* |
+
+Saying T4a is closed while slice 1 ships without the mechanism would be the assertion the overview
+forbids. It is specified here, sequenced in §20, and open until then.
 
 ### 12.1 T4e — filesystem policy
 
@@ -702,22 +913,65 @@ cannot rewrite its own history.
 > `cdl-agent-lifecycle` must define an egress policy, or this is accepted explicitly rather than by
 > omission."*
 
-The policy, stated rather than omitted:
+The policy is delivered in **two stages**, because one of them is buildable now and the other is a
+subsystem. Draft 1 stated the endpoint without the topology, which made a substantial piece of
+network engineering read like a settled detail.
 
-- Each agent gets its **own network namespace**. It has no route to the outside directly.
-- All egress is forced through a **cdl-run HTTPS `CONNECT` proxy** that allow-lists by **hostname**,
-  and DNS resolution inside the namespace is restricted to that proxy. Hostname allow-listing rather
-  than IP allow-listing is deliberate: provider APIs sit behind CDNs whose address sets change
-  without notice, so an IP list would break working agents and tempt an operator into disabling it.
-- The allow-list is per-unit — the provider endpoints its adapter needs, the local llama-swap
-  endpoint, the git remotes configured for its repository, and the package indexes its toolchain
-  needs — and is **recorded on the unit row**, so what an agent was permitted to reach is auditable
-  after the fact.
-- `--net=none` is available for units that need no network at all, and is the default for units
-  whose provider is `local`, since llama-swap is reachable over a unix socket.
+#### Stage 1 — `cdl`'s `--net=none`, and it is all that slice 1 ships
 
-**Honest limits, stated because the threat model demands honesty over completeness.** Two, and
-neither is closable by this mechanism:
+The unit runs with **no network namespace connectivity at all**: no interfaces but loopback, no
+routes, no resolver. `--net=none` is cdl's flag; `bwrap --unshare-net` is the implementation. It has
+no moving parts and is **strictly stronger than any allow-list** — there is no egress to control.
+
+It is the **default, and sufficient, for two cases**:
+
+- **Units whose provider is `local`**, which lose nothing: llama-swap is reached over a unix socket
+  bind-mounted into the sandbox, and a unix socket needs no network namespace.
+- **The whole of slice 1**, whose test adapter (§20) makes no network calls at all.
+
+**What stage 1 does *not* do is serve an API-backed agent.** Claude Code and its peers speak HTTPS
+to a provider over TCP, and they read their credentials from their own environment (§10.3) — the
+supervisor cannot proxy on their behalf without terminating and re-originating their traffic, which
+is stage 2's job. So between slice 2 and slice 4, **an API-backed unit runs with ordinary
+unrestricted egress**, which is precisely the state overview §12 records for T4a today. That is a
+gap this spec carries openly rather than one it closes early; §20 is where it closes.
+
+#### Stage 2 — controlled egress for units that need the open internet
+
+Some work genuinely needs it: `pip`/`npm` installs, `git fetch` from a forge, documentation lookups.
+For those:
+
+- The unit's namespace is connected to nothing but a **per-unit unix socket**, bind-mounted at a
+  fixed path, on which a **cdl-run `CONNECT` proxy** listens. There is no veth pair, no bridge, no
+  NAT, and no IP route out of the namespace — the socket is the only egress path.
+- **The socket is the unit's identity.** Because each unit gets its own socket, the proxy knows
+  which unit is calling from *which socket accepted the connection*, and applies that unit's
+  allow-list. No tokens, no credentials, nothing for an agent to steal or forge — an agent cannot
+  reach another unit's socket because it is not mounted in its namespace (§12.1).
+- **DNS does not exist inside the namespace.** No resolver is configured and no UDP egress is
+  possible. The agent hands the proxy a *hostname* in the `CONNECT` request and the proxy resolves
+  it. This is what makes hostname allow-listing enforceable rather than advisory: an agent cannot
+  resolve a name to an IP and then connect to the IP behind the list's back.
+- Allow-listing is by **hostname**, not IP, because provider APIs sit behind CDNs whose address
+  sets change without notice; an IP list would break working agents and tempt an operator into
+  disabling the whole mechanism.
+- The list is per-unit — its adapter's provider endpoints, its repository's configured git remotes,
+  and its toolchain's package indexes — and is recorded in `unit.egress_allow` (§5.2), so what an
+  agent was permitted to reach is auditable after the fact.
+- **`git` over SSH works, and needed saying.** A `CONNECT` proxy carries arbitrary TCP, not only
+  HTTP, so `ssh` reaches an allow-listed forge through it via `ProxyCommand`, which cdl writes into
+  the unit's sandboxed SSH config pointing at the unit's socket. Port 22 to allow-listed hosts only.
+  Without this, stage 2 would have silently broken every `git@github.com:` remote — the common case.
+- **Teardown is the supervisor's**, in the same path that reaps the child: the namespace dies with
+  its last process, and the supervisor unlinks the socket and closes the proxy listener. A crashed
+  supervisor leaves a stale socket in `$XDG_RUNTIME_DIR`, which `cdl reconcile` removes once it has
+  established that no live supervisor answers `describe` on it (§7.3).
+
+**Stage 2 does not ship in the first slice.** It is specified here so the schema and the sandbox
+interface can carry it, and so §20's ordering has something concrete to defer.
+
+**Honest limits of stage 2, stated because the threat model demands honesty over completeness.**
+Two, and neither is closable by this mechanism:
 
 1. This constrains *where* an agent may send data, not *what*. An agent permitted to reach its
    provider can send that provider anything in its worktree — which is T4d, accepted by the overview
@@ -743,7 +997,7 @@ Therefore:
    and attempts a trivial `bwrap` invocation. Failure is `launch_failed`, never a degraded launch.
 
 Point 3 exists because points 1 and 2 depend on a vendor's flag behaving as documented, and the
-consequence of that assumption being wrong is an unsandboxed agent. cdl verifies rather than trusts.
+consequence of that assumption being wrong is an unsandboxed agent. cdl checks it itself.
 
 ---
 
@@ -754,15 +1008,35 @@ Minimum: per-job declared budget, per-provider concurrency ceiling, global daily
 hard-stop where the API permits, runtime and token accounting, cost visible in `cdl status`, and
 defined behaviour when a provider exposes no reliable cost data."*
 
+### 13.0 What "enforced" can mean here
+
+D33 says spend control is *"best-effort but not unowned"*, and the design must be exact about which
+half applies where, because the two look identical in a status table and are not.
+
+**cdl controls admission, not requests.** It decides whether a unit starts; it does not sit between
+an agent and its provider, so it cannot refuse an individual API call. That fixes what is possible:
+
+| Control | Status | Why |
+|-|-|-|
+| Refusing to **start** a unit when the daily ceiling is reached | **Enforced** | cdl owns admission |
+| Refusing to start a unit whose declared budget is already spent | **Enforced** | Same |
+| **Terminating** a running unit that exceeds its budget | **Enforced, after the fact** | cdl can kill the process, but only once it has observed the overspend — the request that crossed the line was already paid for |
+| Preventing a single request from exceeding a budget | **Not possible** | Would require cdl to proxy provider traffic and parse every request |
+| Knowing spend in real time | **Observed, best-effort** | §13.3; many CLIs report cost only after a response, some not at all |
+
+So a per-unit budget is a **stop-loss, not a cap**: overshoot is bounded by one request's cost plus
+the detection interval, not by zero. `cdl status` and the docs use that word, because "budget" reads
+like a cap and would be believed as one.
+
 ### 13.1 Per-unit budget
 
-`--budget <usd>` at creation, recorded in `budget_usd`. On exceedance the supervisor drives
-`stopping → terminal(cancelled)` and records the reason. Absent a budget, the global ceiling
-(§13.2) still applies.
+`--budget <usd>` at creation, converted to micros and recorded in `budget_micros` (§5.2). On observed
+exceedance the supervisor drives `stopping → terminal(cancelled)` and records the reason and the
+overshoot. Absent a budget, the global ceiling (§13.2) still applies.
 
 ### 13.2 Global daily ceiling
 
-Two thresholds in config: a **warning** level, surfaced in `cdl status` and by the notifier, and a
+Two thresholds in config: a **warning** level, shown in `cdl status` and by the notifier, and a
 **hard stop** level, at which admission refuses new units. Running units are not killed by the
 global ceiling — only new admissions are refused — because killing work already paid for to save
 money is the wrong trade.
@@ -775,6 +1049,10 @@ The case D33 requires a defined behaviour for.
 2. Otherwise, if the provider offers a usage API, poll it (`source = 'provider-api'`).
 3. Otherwise, estimate from a **shipped price table** keyed by model (`source = 'price-table'`), and
    set `spend_is_estimated`.
+
+The price table is versioned and dated, and `cdl doctor` warns when it is older than a configurable
+age. A stale price table produces confidently wrong numbers, which is worse than obviously missing
+ones.
 
 **An estimated figure is never presented as measured.** `cdl status` renders estimates with a `~`
 prefix, and a unit whose spend is estimated **cannot be hard-stopped on cost alone** — a guess must
@@ -806,13 +1084,16 @@ not draining shows what it is short of.
 
 ```
 cdl agent new [--adapter X] [--provider Y] [--model Z] [--branch B]
-              [--budget USD] [--prompt-file F] [--vram MIB]
-cdl agent list | attach <id> | cancel <id> | logs <id> [-f]
+              [--budget USD] [--prompt-file F] [--vram MIB] [--no-worktree]
+cdl agent list | cancel <id> | logs <id> [-f]
+cdl agent attach <id> [--takeover]          # §4.3.1; without it, attaches as observer
 cdl job submit [--backend ssh|slurm|hfjobs] ... | list | status <id>
-              | logs <id> | cancel <id> | artifacts <id>
+              | logs <id> [-f] | cancel <id>
+cdl job artifacts <id> [--fetch]            # §19.6
+cdl job gc --host <h> [--force]             # §19.8; remote directories
 cdl status [--json] [--attention]
-cdl worktree new <branch> | list | gc
-cdl reconcile
+cdl worktree new <branch> | list | release <id> | gc [--force]
+cdl reconcile [--rebuild]                   # --rebuild: after registry loss, §7.3.1
 cdl doctor
 ```
 
@@ -826,9 +1107,13 @@ cdl doctor
 - **`STATE` is the state machine's own vocabulary** (§3), never a prettified synonym. What the
   registry stores is what the operator reads.
 - **`SPEND`** shows `~` for estimates (§13.3).
-- **`NOTE`** carries exactly one short reason: why a unit is queued, what a `lost` unit lost, that a
-  remote row is stale and how old the last probe is, that a `waiting` came from the idle heuristic
-  alone.
+- **`NOTE`** carries exactly one short reason, and each has a column behind it rather than being
+  reconstructed at render time: why a unit is queued (`queued_reason`), that a remote row is stale
+  and how old the last probe is (`last_probe_at`, `probe_status`), that a cancel is recorded but
+  undelivered to an unreachable host (`cancel_requested_at` with `probe_status = 'unreachable'`,
+  §19.7), that a row was rebuilt after registry loss (`recovered`, §7.3.1), what a `lost` unit lost,
+  and that a `waiting` came from the idle heuristic alone.
+- **`SPEND` is a stop-loss reading, not a cap**, and §13.0 governs what it can be trusted to mean.
 - **`--json`** emits the same data with stable field names, and is the interface the notifier and
   any status bar consume. Human formatting is never parsed by another component.
 - **Degraded, never blank.** If a remote backend cannot be probed, its rows still render, marked
@@ -875,31 +1160,72 @@ whole sequence, and `exit_code` is recorded on completion.
 
 ### 18.2 Reconciliation
 
-Start a unit, `SIGKILL` its supervisor, run `cdl reconcile`; the row becomes `terminal`/`lost` with
-a `unit_event` naming the reconciler and the deciding check. Separately: reboot with a unit running,
-confirm check 1 resolves it. Separately: restore a registry backup, confirm every row is re-probed.
-Separately: make a remote host unreachable and confirm its rows are marked **stale, not lost**.
+Each of these is a separate test, and the last two are the ones draft 1 would have failed:
 
-### 18.3 Port allocation
+1. `SIGKILL` a unit's supervisor, run `cdl reconcile`; the row becomes `terminal`/`lost` with a
+   `unit_event` naming the reconciler and the deciding check id.
+2. Reboot with a local unit running; check `L1` resolves it.
+3. Restore a registry backup; every row is re-probed.
+4. Make a remote host unreachable; its rows are marked **stale, not lost**, and `last_probe_at`
+   advances even though `state` does not.
+5. **Reboot the laptop with a remote job still running on a reachable host.** The job must remain
+   `running`, and `R4` must be the deciding check. This is the regression test for the draft 1
+   defect in which the local `boot_id` was consulted for every backend (§21 finding 2).
+6. **Corrupt the registry, then `cdl reconcile --rebuild`.** Live supervisors are rediscovered from
+   their systemd units and sockets, their rows rebuilt from the launch manifests and marked
+   `recovered`; a unit whose supervisor is also gone is reported as an orphaned artifact and **not**
+   resurrected into a row (§5.4).
+
+### 18.3 State-machine invariants
+
+- **Queued cancellation.** Cancel a unit that is still `queued` behind a concurrency limit. It
+  reaches `terminal`/`cancelled` **without a supervisor ever being started** — no systemd unit, no
+  PTY, no log — and the deciding `unit_event` names `actor = 'admission'` (§3.4).
+- **Pre-handoff `launch_failed`.** Request an unsupported adapter/provider pair; the unit reaches
+  `terminal`/`launch_failed` written by admission, with no supervisor started.
+- **The schema refuses illegal rows.** Writing `state = 'terminal'` with a null `outcome`, or a
+  non-terminal state carrying one, is rejected by the `CHECK` constraints rather than by
+  application code (§3.5).
+- **No state change without its event.** Kill the process between the two writes; the transaction
+  rolls back and `unit.state` and `unit_event` still agree.
+
+### 18.4 Attach arbitration
+
+Attach two clients with **different terminal sizes**. The second is an observer, its keystrokes are
+discarded, and `TIOCSWINSZ` follows the writer alone — the agent's rendered width does not change
+when the observer's window is resized. `--takeover` transfers the writer role and **both** clients
+are told in-band. When the writer detaches, the observer is promoted and told (§4.3.1).
+
+### 18.5 Port allocation
 
 Two concurrent `cdl worktree new` invocations that hash to the same preferred block receive
 different blocks, both recorded, the second with `preferred = 0`. Exhausting the range yields
-`launch_failed` naming the range.
+`launch_failed` naming the range. **Separately**: run two agents in sequence in one worktree and
+confirm the second is handed the *same* port block as the first, because the block belongs to the
+worktree (§8). Release the worktree, `gc` it, and confirm the branch can be created again — the
+active-only index permits reuse where draft 1's permanent constraint did not (§5.2).
 
-### 18.4 Sandbox
+### 18.6 Sandbox
 
 From inside a running agent: reading another unit's worktree fails; reading the keystore fails;
-reading the registry fails. Egress to a non-allow-listed host fails. With
+reading the registry fails. **Under stage 1 (§12.2), the namespace has no interface but loopback and
+no resolver**, which is the property slice 1 tests — not an allow-list. Stage 2's test, when it
+ships, is that egress to a non-allow-listed host fails *and* that a `git@` remote over an
+allow-listed forge still works. With
 `kernel.apparmor_restrict_unprivileged_userns` set so `bwrap` cannot start, admission produces
 `launch_failed` and **no agent process is created** — the test that matters, because the failure
 mode being guarded against is running unsandboxed.
 
-### 18.5 Spend
+### 18.7 Spend
 
-A unit with `--budget` below its projected cost is stopped and recorded `cancelled`. A unit whose
-spend is estimated is **not** hard-stopped, and its `cdl status` row shows `~`.
+A unit with `--budget` below its projected cost is stopped and recorded `cancelled`, and the
+recorded overshoot is non-zero — the test asserts a **stop-loss, not a cap**, because §13.0 says
+that is what it is, and a test asserting zero overshoot would be asserting something the design
+does not claim. A unit whose spend is estimated is **not** hard-stopped, and its `cdl status` row
+shows `~`. Budget arithmetic is exercised in integer micros with a value chosen to be
+unrepresentable in binary floating point (e.g. `$0.10`), asserting no drift over many increments.
 
-### 18.6 Confirm the reported values
+### 18.8 Confirm the reported values
 
 The overview marks the `systemd-oomd` defaults and the AppArmor/bubblewrap interaction *reported,
 not reproduced*. Before either is relied on, both are to be measured on the target and the result
@@ -907,11 +1233,182 @@ recorded here.
 
 ---
 
-## 19. Open items
+## 19. The `ssh` backend protocol
+
+### 19.1 Why this is a protocol
+
+D28 puts 2–4 units on the lab GPU host, so `ssh` is not an optional extra — it is a third of the
+working shape, and overview §7 commissions the backend contract from this component. Draft 1 named
+the backend in six places and never defined it, which left `cdl job submit --backend ssh` looking
+specified when what existed was a column value.
+
+A remote unit must satisfy **the same guarantees as a local one**: it survives the laptop's reboot,
+its logs outlive the connection, reconciliation can tell alive from dead, and cancellation works.
+An `ssh` invocation gives none of those; a protocol has to.
+
+The rule that generates the rest: **the connection is not the unit.** A dropped ssh session must be
+indistinguishable, from the unit's point of view, from nothing happening at all.
+
+### 19.2 Remote identity
+
+Every remote unit records three things at launch, and §7.2's `R` ladder reads all three:
+
+| Column | Source | Why |
+|-|-|-|
+| `remote_host` | The target | Which frame of reference applies |
+| `remote_boot_id` | `/proc/sys/kernel/random/boot_id` **on the remote host** | A remote reboot kills remote processes; the local boot id says nothing about them (§7.2) |
+| `remote_pid` | The remote supervisor's pid | Identity, checked together with the cmdline against PID reuse |
+
+The remote side also writes a **marker file** at `<remote_dir>/.cdl-unit.json`, mode 0600,
+containing the unit id, the boot id and the pid. It is the same role the local launch manifest plays
+in §7.3.1: it lets a probe re-establish identity when the registry and the remote host disagree, and
+it lets an orphaned remote directory be attributed to the unit that created it.
+
+### 19.3 Launch, and idempotency
+
+1. cdl ensures `remote_dir` exists — `<configurable base>/<unit-id>`, unique by construction, so two
+   launches cannot collide in the filesystem.
+2. It writes the marker file **before** starting anything.
+3. It starts the remote supervisor **detached from the ssh session**, under `systemd-run --user` where
+   the remote host has a user manager, and `setsid` + `nohup` otherwise. Which one was used is
+   recorded, because it determines how §19.5 probes and how §19.7 cancels.
+4. It reads back the pid and boot id, and records them in one transaction with `queued → starting`.
+
+**Idempotency is by the unit id, and it has to be**, because the failure that actually happens is the
+ssh connection dropping *after* the remote process started but *before* cdl learned its pid. Re-running
+launch for the same unit id finds the marker file, adopts the running process, and starts nothing
+new. A launch that cannot determine whether it started something resolves to `launch_failed` and
+says which remote directory to inspect — **it never retries blind**, because a blind retry is how one
+job becomes two jobs writing to one directory.
+
+### 19.4 Durable logs
+
+The remote supervisor appends to `<remote_dir>/log` on the **remote** disk, exactly as the local one
+appends locally. It does not stream to the laptop as its system of record: a log that exists only in
+a live ssh pipe is lost when the connection drops, which is the condition it most needs to survive.
+
+`cdl job logs <id>` tails the remote file over ssh. `-f` follows and **reconnects on drop**, marking
+the gap in its output rather than silently resuming, since a silent resume is indistinguishable from
+a quiet period. On terminal transition the log is fetched once into the local log directory, after
+which the unit's history is local and survives the remote host being decommissioned.
+
+### 19.5 Reconnect and probe
+
+The probe is §7.2's `R` ladder. It is one ssh invocation carrying a small script: read the boot id,
+read the marker, test the pid and its cmdline. `ConnectTimeout` is short and bounded, and its
+exhaustion means **unreachable, never dead** (`R1`). Probe results are written to `last_probe_at`
+and `probe_status` whether they succeeded or not, so `cdl status` can say how old its knowledge is.
+
+### 19.6 Artifacts
+
+A job declares artifact paths relative to its `remote_dir`. On terminal transition cdl lists them,
+records a row per artifact in the `artifact` table (§5.2) with size and `sha256` **computed on the
+remote host**, and fetches on demand rather than automatically — a multi-GB checkpoint should not
+cross the network because a job finished.
+
+`cdl job artifacts <id>` lists them; `--fetch` retrieves, verifies the digest locally, and sets
+`local_path` and `fetched_at`. **A digest mismatch is an error, never a warning.**
+
+### 19.7 Cancellation
+
+`cancel_requested_at` is set locally, as for any unit (§3.4). The remote supervisor polls the marker
+directory for a `cancel` file that cdl writes over ssh, and on seeing it runs the same
+`SIGTERM` → grace → `SIGKILL` sequence a local supervisor runs, then writes its own terminal record
+into the marker file for the next probe to collect.
+
+**Cancellation must work while the unit is unreachable**, so the request is durable rather than
+delivered: if the host is down, `cancel_requested_at` stays set and the file is written on the next
+successful contact. `cdl status` shows the unit as *cancel pending* — the operator's intent is
+recorded and will be acted on, which is different from a request that was dropped.
+
+### 19.8 Cleanup
+
+`remote_dir` outlives the unit by default, for the same reason a worktree does: the output is
+usually the point. `cdl job gc --host <h>` removes remote directories for units that reached
+`terminal` more than a configurable age ago, **refusing any with unfetched artifacts** unless
+`--force`. Remote directories with no matching registry row are reported as orphans and never
+deleted automatically — the registry is the less trustworthy of the two after a restore (§5.5), so
+it must not be the thing that authorises a deletion.
+
+### 19.9 Not in the first slice
+
+None of this ships in slice 1 (§20). It is specified now because the schema, the state machine and
+the backend interface must carry it, and because writing it down is what turned four columns and a
+command name into a set of operations with defined failure behaviour.
+
+---
+
+## 20. Implementation order
+
+The design covers the whole §7 brief (DA1). **Implementation does not**, and the ordering is part of
+the design rather than a scheduling detail: the durable local supervisor is the component's
+correctness core, and remote execution, controlled egress, GPU admission and spend accounting are
+each large enough to obscure whether that core works.
+
+### Slice 1 — the local core
+
+| In | Out |
+|-|-|
+| One local interactive agent, one **test adapter** with deterministic output | The four real CLI adapters |
+| SQLite registry, state + event in one transaction (§3.5) | Remote backends of any kind |
+| Supervisor-owned PTY; append-only log at mode 0600 | Controlled egress (stage 2, §12.2) |
+| One writer, observers, takeover (§4.3.1) | GPU admission and llama-swap |
+| Admission → supervisor handoff (§3.4), including queued cancellation | Spend accounting beyond recording zero |
+| `cdl reconcile` over the local ladder, plus `--rebuild` (§7.3.1) | Worktree GC policy beyond a manual command |
+| bubblewrap with `--unshare-net` (stage 1, §12.2) | |
+| Crash, reboot and corruption acceptance tests (§18) | |
+
+**A test adapter comes before the real ones deliberately.** Slice 1's questions are *does the state
+machine hold under a crash* and *does reconciliation reach the right verdict*, and answering them
+against a real agent CLI means debugging someone else's TUI while trying to establish that your own
+lifecycle is sound. A deterministic adapter that can be told to hang, exit 7, or emit a waiting
+pattern on cue makes every §18 test reproducible.
+
+### Slice 2 — real agents locally
+
+The four adapters (§9), the provider matrix and per-process environment (§10.3), worktrees and port
+blocks (§6, §8), and spike 2 run against Claude Code for real.
+
+### Slice 3 — the remote backend
+
+§19 in full, gated on slice 1's failure tests passing — because a reconciliation bug that is
+awkward locally is very hard to diagnose across a network.
+
+### Slice 4 — the contended resources
+
+Controlled egress (§12.2 stage 2), GPU admission with device reconciliation (§11.3), and spend
+accounting with the price table (§13). Each needs the core to be trustworthy first: all three are
+mechanisms for *refusing* work, and a refusal that fires because of a lifecycle bug is
+indistinguishable from one that fires correctly.
+
+---
+
+## 21. Draft 1 review: findings and resolutions
+
+Draft 1 was reviewed 2026-09-02. Ten findings, all accepted; the review's own sequencing
+recommendation became §20. Recorded so a later reader can see what changed and why, rather than
+diffing two drafts.
+
+| # | Finding | Resolved in |
+|-|-|-|
+| 1 | Transition ownership contradictory: the rule said the supervisor writes `starting`, the table said admission did; queued cancellation had no owner; some `launch_failed` cases precede the supervisor | §3.4 rewritten as one-owner-at-a-time with three defined handoffs; §3.2 says which actor writes `launch_failed` when |
+| 2 | Reconciliation started with local `boot_id` for **every** row, so a laptop reboot would mark live remote jobs `lost` | §7.2 dispatches on `backend` first; `remote_boot_id` added (§5.2) |
+| 3 | §5.4 promised re-adoption after corruption, but §7.2 iterated over rows a rebuilt database does not have | §7.3.1 discovery from systemd units and sockets, a `describe` handshake, and a launch manifest; §5.4 states what is *not* recoverable |
+| 4 | Port blocks allocated per worktree but released per unit | §8: owned by the worktree, released at `worktree gc`; §7.5 releases only the GPU lease |
+| 5 | `ssh` backend named in six places, never specified | New §19 |
+| 6 | Every attached client could write and resize, producing input interleaving and a `TIOCSWINSZ` fight | §4.3.1: one writer, observers, explicit takeover |
+| 7 | Network policy stated an endpoint without topology, DNS, proxy identity, cleanup or git-over-SSH | §12.2 split into stage 1 (`--net=none`, ships first) and stage 2, with per-unit sockets as identity |
+| 8 | GPU summation and spend precision both overpromised | §11.3 leases are admission ceilings reconciled against the device; §13.0 tabulates what is enforced vs observed; money moved to integer micros |
+| 9 | Schema lacked artifacts, egress lists, queued reasons, remote fields, probe timestamps; no state/event atomicity or terminal invariants | §5.2 throughout; §3.5 states the two invariants as `CHECK` constraints |
+| 10 | Permanent `UNIQUE (repo_path, branch)` made a branch unusable after release | §5.2 partial unique index on active rows; §6 scopes git's guarantee correctly |
+
+---
+
+## 22. Open items
 
 | # | Item | Why it is open |
 |-|-|-|
-| 1 | **Review findings #6 and #7** | Overview §7 requires this spec to resolve them, but their text is not recorded anywhere in the repository — only referenced. They must be reconciled against the original review before this spec is considered complete. |
+| 1 | **Findings #6 and #7 of the *overview's* revision-1 review** (2026-08-31 — *not* the draft 1 review in §21, which is fully resolved) | Overview §7 requires this spec to resolve them, but their text is not recorded anywhere in the repository — only referenced, in `notes/2026-08-31-session-02-spec-review.md`. They were not reconstructed, because guessing at a review finding and then marking it resolved is worse than leaving it open. Needs the original review text. |
 | 2 | T4c (destructive push to a git remote) | Named in the threat model, not closed here. Candidate: deny-by-default push credentials. Belongs to `cdl-security-and-recovery`, but agents are the actor. |
 | 3 | T4f (one credential set shared by every agent) | Per-agent credential scoping is not designed. §12.1 removes the keystore from the agent's namespace, which is a partial mitigation, not a closure. |
 | 4 | Slurm backend | Designed as a backend row and a state mapping; ships **disabled** per D30 until its auth is testable. |

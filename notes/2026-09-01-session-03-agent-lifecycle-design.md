@@ -138,3 +138,63 @@ to lose. This keeps the capability while removing the silence that F4 warned abo
 **Three of four agent CLIs are redistributable.** Only Claude Code needs the vendor-installer path.
 This is a packaging fact and belongs to `cdl-install-and-packaging`; recorded here because DA3
 depends on it and because the research left it open.
+
+---
+
+## Draft 1 review (2026-09-02) — ten findings, all accepted
+
+External review of draft 1. **Every finding was verified against the spec text before acting**,
+not accepted on trust; all ten reproduced. The review also audited M0 and found it substantively
+complete with three bookkeeping defects.
+
+### M0 — closed this session (commit `8c19beb`)
+
+| Item | Resolution |
+|-|-|
+| Swap sizing undecided, but required by overview §6's M0 exit | **D36: 136 GiB**, sized for a possible 128 GB upgrade. User decision. |
+| Profile line 48 said "SMART health is still unknown" | False since 2026-09-01; three later sections in the same file say PASSED. Replaced with the measurement. |
+| Lockdown confirmation still written as a hypothesis | Confirmed 2026-09-01 and re-confirmed by `verify-firmware.sh`. Rewritten as measured. |
+| **Found independently:** committed `firmware-verify.md` carries `0` twice for the boltd device count | Two bugs in the generating script (multibyte glyph in a bracket expression; `grep -c` exit status defeating `\|\| echo 0`). Script already fixed. Generated output **annotated, not rewritten** — editing captured output to say what it should have said destroys its value as evidence. True value is 1. |
+
+### Lifecycle spec — draft 2 (§21 carries the full table)
+
+The two findings worth remembering beyond the spec, because both were *my* reasoning errors
+rather than omissions:
+
+1. **Finding 2, the reconciliation order, was a live data-loss bug.** Draft 1 checked local
+   `boot_id` first for *every* row. Rebooting the Tensorbook would have marked every running
+   remote job `lost` and released its leases — while the work was still running on the GPU host.
+   The lesson generalises: **process identity is a fact about the machine the process runs on**,
+   so any identity check must be dispatched on location before it is applied.
+
+2. **Finding 1 was a contradiction inside a single section.** §3.4 stated "only the supervisor
+   writes `starting`" and then, four lines later, assigned `queued → starting` to the admission
+   controller. The self-review pass read for placeholders and dangling references and did not
+   read the rule against its own table.
+
+### Process change adopted this round
+
+Draft 1's self-review missed all ten. Two mechanical checks were added and both now run on
+every spec revision (they found real defects on this pass):
+
+- **Every internal `§N.M` reference must resolve to a real heading.** Distinguishes references
+  to *this* document from `overview §N`.
+- **Every schema identifier named in prose must exist in the schema, and vice versa.** This is
+  finding 9's whole class: draft 1 promised `artifacts`, egress lists, queued reasons and probe
+  timestamps in prose while the `CREATE TABLE` block had none of them.
+
+Two further self-caught defects, from writing the fixes rather than from the review:
+
+- Stage 1 of §12.2 claimed the supervisor "holds the credentials the agent never sees", which
+  contradicts §10.3 — the agent *does* receive provider variables in its environment.
+- §12's heading claimed to close T4a while the mechanism is deferred to slice 4. Rewritten to
+  say which row closes when; T4a is *defined and explicitly accepted* until slice 4, which is
+  the alternative the overview itself offers.
+
+### Still open
+
+- **Overview review findings #6 and #7** (from the 2026-08-31 revision-1 review, *not* this
+  round). Text exists nowhere in the repo — only references. Not reconstructed, because guessing
+  a finding and then marking it resolved is worse than leaving it open. **Needs the original
+  review text from the user.**
+- The single unreproduced `test-capture-safety.sh` failure. Not root-caused; not claimed fixed.
