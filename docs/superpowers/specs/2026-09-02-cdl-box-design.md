@@ -317,11 +317,43 @@ by a client that has no administrative access to the NAS, so a wiped repository 
 recoverable from the most recent snapshot. Conceptually, the storage layer becomes the
 append-only layer.
 
-Two conditions have to hold for that to work, and neither is assumed:
+### 10.2 The NAS is a QNAP, and QNAP snapshots have a hard prerequisite
 
-- The NAS must actually be snapshotting the dataset that holds the repository, on a schedule,
-  with a retention window longer than the gap between backup checks. If it is not, T5 is
-  simply open and should be recorded as open.
+**Checked against QNAP's documentation on 2026-09-02, because the answer decides whether
+§10.1's substitute exists at all.**
+
+> *"Only thick volumes, thin volumes and block-based LUNs created in a storage pool support
+> snapshots."* Static volumes, created directly on RAID groups, do not.
+
+**This is the one thing to check before B7, and it is binary.** If the share the backup
+repository sits on is a **static volume**, QNAP cannot snapshot it, no configuration will
+change that, and threat T5 is open rather than mitigated. Moving a static volume to a
+storage pool is a rebuild of that volume, not a setting, so finding out late is expensive.
+
+The other documented conditions, in decreasing order of how likely they are to bite:
+
+| Condition | Detail |
+|-|-|
+| Volume type | Thick or thin, in a storage pool. **Static volumes are excluded.** |
+| Free pool space | Snapshots are *"stored outside of volumes and LUNs, in free storage pool space"*, so the pool needs headroom or snapshots stop being taken |
+| Snapshot count | *"depends on the NAS model and how much memory is installed"* |
+| RAM | 1 GB minimum; below that QNAP disables snapshots entirely. Any NAS worth backing up to will clear this |
+
+**The QNAP must not be reachable from the internet, and that is now a requirement of this
+design rather than general hygiene.** Once snapshots are the only thing protecting the
+backup, a compromise of the NAS takes the backup and its protection together. QNAP's own
+advisories describe ransomware campaigns (DeadBolt, Checkmate) that *"targeted all NAS
+exposed to the Internet without any protection"*, and QNAP's remediation advice is to
+disable port forwarding for the NAS management ports on the router and to turn off UPnP
+port forwarding. Reach it over the tailnet or the LAN, never a forwarded port.
+
+### 10.3 Two conditions on the laptop side
+
+Neither is assumed, and both are checked as part of B7:
+
+- The NAS must actually be snapshotting the volume that holds the repository, on a schedule,
+  with a retention window longer than the gap between backup checks. A snapshot feature that
+  is available but not enabled protects nothing.
 - The laptop's SSH credential must not be able to reach the snapshots. In practice this
   means a dedicated unprivileged user, chrooted to the repository path via
   `ForceCommand internal-sftp`, and no NAS administrative access from that account.
@@ -365,5 +397,5 @@ Each milestone has an exit test, not a judgement.
 |-|-|-|
 | 1 | Which GPU drives the dock's external display | Deferred from M0, and it only matters if a monitor is ever attached to this box. On a headless server it may never need answering. |
 | 2 | Whether `croft` and the Emacs LLM integration are still wanted | Both came from the original requirements list, which predates the headless decision. |
-| 3 | **Does the NAS snapshot the backup dataset, and can the laptop's credential reach those snapshots?** | Answered in part: the NAS runs no containers, so `rest-server --append-only` is out and transport is SFTP (§10.1). What is still open is whether the snapshot substitute exists. If the answer is no, threat T5 is open rather than mitigated, and the honest move is to record it as open instead of describing the backup as protected. Check before B7. |
+| 3 | **Is the QNAP share on a thick or thin volume in a storage pool, rather than a static volume?** | The NAS runs no containers, so transport is SFTP and T5's mitigation moved to NAS snapshots (§10.1). QNAP supports snapshots only on thick or thin volumes in a storage pool (§10.2), so this single fact decides whether the substitute exists. If it is a static volume, **record T5 as open** rather than describing the backup as protected, and treat converting the volume as a separate piece of work. Check before B7. |
 | 4 | Whether `zellij` scrollback loss is tolerable in practice | If it is not, the answer is per-session `script(1)` logging rather than the archived supervisor design. |

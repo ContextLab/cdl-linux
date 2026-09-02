@@ -55,8 +55,14 @@ Two new decisions in the same spirit:
 1. User review of the box spec.
 2. **NAS: no containers** (answered 2026-09-02). So no `rest-server --append-only`, and
    threat T5 is no longer closed by the transport. Backups are restic over SFTP, and the
-   append-only property has to come from NAS-side snapshots instead. **Confirm those exist
-   before B7** -- if they do not, T5 is open and should be recorded as open. This matters
-   more now that the volume is striped: no redundancy and no protected backup at once.
+   append-only property has to come from NAS-side snapshots instead.
+
+   **The NAS is a QNAP, and that makes the check specific and binary.** QNAP supports
+   snapshots only on thick or thin volumes in a storage pool; static volumes created
+   directly on RAID groups do not support them, and no setting changes that. So the one
+   thing to check before B7 is the volume type of the backup share. If it is static, T5 is
+   open and must be recorded as open, and converting the volume is separate work. This
+   matters more now that the array is striped: no redundancy and no protected backup at
+   once.
 3. Then B1: base install, headless, SSH, Tailscale. Exit test is a reboot that comes back
    reachable by name with XHCI wake disabled.
