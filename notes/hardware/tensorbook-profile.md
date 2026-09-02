@@ -5,9 +5,11 @@
 note the machine has taken a kernel update since the first capture). Published as
 `notes/hardware/tensorbook-20260901T124921Z-diagnosis.md`.
 
-**Status: M0 is complete except the firmware gate.** Every command-capturable item is now
-recorded. Outstanding: the four firmware observations, which need a reboot into setup, and the
-dock connector question, deliberately deferred to M2 (§16.6).
+**Status: the M0 firmware gate is CLOSED.** Every command-capturable item was recorded by the
+captures; the firmware observations were made by walking AMI Aptio V setup on 2026-09-01 and are
+recorded in `notes/hardware/firmware-gate-checklist.md`. Outstanding: one post-reboot measurement
+(VT-d, via `scripts/verify-firmware.sh`), and the dock connector question, deliberately deferred
+to M2 (§16.6).
 **Raw capture:** `notes/hardware/tensorbook-<date>-raw.md` — gitignored, retained off-machine.
 
 Redacted: serial numbers, MAC addresses, filesystem UUIDs and hostname are deliberately absent.
@@ -216,73 +218,162 @@ permanently unavailable to agents.
 | `smartmontools` not installed | ✅ **Closed** — both drives read, both PASSED |
 | Kernel lockdown state not read | ✅ **Closed** — `[integrity]` confirmed active; D29's cause is now observation, not inference |
 | Fan, hwmon and thermal-zone inventory absent | ✅ **Closed** — no fan telemetry or control exists; 29 cooling devices; policy must rest on throttling |
+| Four firmware observations not made | ✅ **Closed** — AMI Aptio V walked 2026-09-01; all four answered. See `notes/hardware/firmware-gate-checklist.md` |
+| VT-d state not directly read | ⬜ **Open** — no firmware toggle exists, so it cannot be read from setup. Measure with `scripts/verify-firmware.sh` |
 | Battery `charge_full_design` absent | Expected — this battery reports in energy units, and `energy_full_design` was captured |
 | Which GPU drives a docked external monitor | ⬜ **Deferred to M2** (§16.6). The follow-up did identify the dock itself: a **USB4 dock, "T4801" (Shenzhen Lianfaxun)**, already authorized with `iommu` policy, showing `disconnected` at capture time |
 | NVIDIA connectors absent from this run | ⬜ Only `card1` (i915) connectors were enumerated this time, though the first capture saw `card0-DP-5`…`DP-8` and `HDMI-A-1`. Most likely the dGPU was runtime-suspended or unbound. **Re-check while docked** — it bears directly on §16.6 |
 
-## Firmware settings — the M0 gate, and what is worth changing
+## Firmware settings — the M0 gate: OBSERVED, and mostly not what was expected
 
-Requires a reboot into setup. Menu names differ between firmware revisions, so these are described
-by what they do; if a setting is not exposed, record that it is absent — an absence is a finding.
+**Walked 2026-09-01.** Firmware is **AMI Aptio V**, core 2.21.1278. Tabs: Main / Advanced /
+Chipset / Security / Boot / Save & Exit. Full item-by-item record, including menu maps and the
+reasoning for each decision, is in `notes/hardware/firmware-gate-checklist.md`.
 
-**Record before changing anything**, so the starting state is recoverable.
+**The headline: this firmware is heavily stripped.** Of the six settings this section previously
+recommended changing, **four do not exist**. Every absence pushes work onto the OS spec rather
+than resolving it, so the absences are load-bearing findings, not trivia.
 
-### Must record (the M0 gate)
+### The four M0 gate observations — all answered
 
-- [ ] **Intel VMD/RST vs AHCI** — highest-consequence unknown. Both drives are visible to a running
-      Linux kernel with the standard `nvme` driver, which is *suggestive* that VMD is off, but the
-      installer's behaviour is what matters. **If VMD is on, turn it off** — otherwise a stock
-      installer may see no disks at all.
-- [ ] **Chipset graphics mode** — hybrid vs dedicated-GPU-only. The DRM topology already shows
-      hybrid with the panel on the iGPU, so this is confirmation rather than discovery. See below
-      before changing it.
-- [ ] **Can Secure Boot be disabled?** — now load-bearing: it is the D29 decision.
-- [ ] **Is a BIOS password set?**
+| Question | Answer, as read from firmware 2026-09-01 |
+|-|-|
+| Intel VMD/RST vs AHCI | **`Intel VMD Technology [Disabled]`.** Native NVMe. `Advanced → NVMe Configuration` lists both drives individually, and no RST menu exists. A stock installer will see both disks |
+| Chipset graphics mode | **`GPU Mode [NVIDIA(R) Optimus(TM)]`** — Optimus *is* hybrid. Confirms the DRM topology from the firmware side |
+| Can Secure Boot be disabled? | **Yes.** The field offers `Enabled`/`Disabled`. `System Mode [Deployed]`, `Vendor Keys [Active]` |
+| Is a BIOS password set? | **No.** `Administrator Password` and `User Password` both `Not Installed` |
 
-### Worth changing, each tied to a measurement
+*Previously this section recorded VMD as "suggestive" from the `nvme` driver binding. It is now a
+direct firmware read, corroborated by PCI addressing in domain `0000` and the absence of any
+VMD/RAID-class controller in `lspci`.*
 
-| Setting | Recommendation | Why, from the captures |
+### What was actually changed: one setting
+
+| Setting | Change | Why |
 |-|-|-|
-| **Secure Boot** | **The D29 decision.** Do not disable it merely to finish M0 — record that it *can* be, and decide before M3 | Measured: lockdown `[integrity]` is active and is what hides `disk`. Disabling Secure Boot is the only way to get hibernation on a stock Ubuntu kernel here. Cost: an unverified boot chain |
-| **Fan / thermal profile** (if a performance or cooling-profile setting exists) | **Set the most aggressive cooling profile available** | Measured: 0 fan inputs, 0 writable PWM — the OS cannot influence fans *at all*. Firmware is the only place a fan curve can be chosen, and D28 puts 1–2 local agents on the GPU |
-| **Thunderbolt / USB4 security level** | **Lower it, or pre-authorise the dock** | The dock (`T4801`, USB4) is already `stored` with `iommu` policy, so this may already be fine. But on a TUI-only machine there is no GUI to approve a new Thunderbolt device — an authorisation prompt has nowhere to appear, and the dock would simply not work. `iommu` policy keeps DMA protection while removing the prompt |
-| **Fast Boot** | **Disable** | Fast Boot commonly skips USB initialisation. The design requires installing from USB *and* permanently retaining a live-USB rescue path (§11); a rescue stick that will not boot is not a rescue path |
-| **Wake on USB / XHC wake** | **Disable if exposed** | Research flagged spurious wake from XHC on this chassis. Also a candidate explanation for the 65–66 unsafe shutdowns: a machine that wakes in a bag or fails to resume gets power-cycled by hand |
-| **Sleep mode: S3 vs Modern Standby / S0ix** | **Keep S3** — verify it stays selected | Measured: `mem_sleep` reads `s2idle [deep]`, so deep S3 is available and selected. That is the good outcome; research links s2idle on this chassis to suspend failures |
+| **Fast Boot** | `Enabled` → **`Disabled`** | Fast Boot commonly skips USB initialisation. §11 requires installing from USB *and* permanently retaining a live-USB rescue path; a rescue stick that will not boot is not a rescue path |
 
-### Leave alone
+### What does not exist — four recommendations this section can no longer make
+
+| Previously recommended | Reality | Consequence |
+|-|-|-|
+| "Set the most aggressive cooling profile available" | **No fan, thermal or cooling-profile setting exists anywhere in this firmware** (Advanced, Chipset, and Power and Performance all searched) | Combined with the measured 0 fan inputs and 0 writable PWM, there is **nowhere in this system, firmware or OS, to influence fans**. §16.5's sustained-load policy must rest *entirely* on throttling and refusal-to-launch. This is no longer a fallback; it is the only mechanism |
+| "Lower the Thunderbolt/USB4 security level" | **No security level is exposed.** `Advanced → Thunderbolt Configuration` contains one line, `Integrated Thunderbolt Support [Enabled]` | Authorisation lives wholly in `boltd`. **`bolt`/`boltctl` is now a HARD dependency for M3**: if it is absent after the reinstall, or its database does not carry across, the dock cannot be authorised and **no firmware setting can rescue it** |
+| "Disable Wake on USB / XHC wake if exposed" | **Not exposed.** `Advanced → USB Configuration` contains one line, `Legacy USB Support [Enabled]`. No wake-from-Thunderbolt either | The spurious-wake hypothesis for the 65–66 unsafe shutdowns is testable and fixable **only** via `/proc/acpi/wakeup`, and any fix must be made persistent by cdl-linux, because that file resets every boot |
+| "Keep S3 — verify it stays selected" | **No S3 / Modern Standby selector exists** | Benign absence: `mem_sleep` already reads `s2idle [deep]`, the outcome we wanted, and nothing can now flip it by accident |
+
+### Secure Boot — unchanged, and the decision is reversible
+
+**Left `Enabled`. Nothing was changed**, per the instruction that this is decided at §3.2 before
+M3 rather than flipped to close M0.
+
+Newly established, and it changes how §3.2 should be approached: **the decision is reversible and
+testable.** `Vendor Keys [Active]`, and this firmware exposes no key-management menu at all — no
+`Key Management`, no `Restore Factory Keys`, no `Erase All Secure Boot Settings`. There is
+therefore no way to erase or corrupt the enrolled keys. Toggling Secure Boot off disables
+*enforcement* while leaving the key store intact, so toggling it back on restores the verified
+boot chain with no re-enrolment. `System Mode [Deployed]` restricts key management, not
+enforcement toggling — separate axes in the UEFI spec.
+
+So §3.2 can be **measured** rather than reasoned about: disable, boot, check `/sys/power/state`
+for `disk` and `/sys/kernel/security/lockdown` for `none`, confirm the signed NVIDIA modules
+still load, then keep it off or re-enable. One reboot each way, fully reversible.
+
+### Left alone, with reasons
 
 - **TPM** — present and usable (`MSFT0101:00`, `tpm_crb`), but D7 rejected TPM auto-unlock. No
-  reason to change it; no reason to disable it either.
-- **Intel SpeedShift / CPU power management** — `intel_pstate` is the active scaling driver and
-  wants these enabled.
-- **VT-d / IOMMU** — leave **enabled**. The Thunderbolt `iommu` policy depends on it, and it is what
-  makes a lower Thunderbolt security level defensible rather than reckless.
+  reason to change it; no reason to disable it either. Firmware entry is `Advanced → Trusted
+  Computing`.
+- **SpeedStep and Turbo Mode** — `Advanced → Power and Performance → CPU - Power Management
+  Control` exposes exactly these two, both `[Enabled]`. Correct: `intel_pstate` is the active
+  scaling driver and wants them. **Do not disable Turbo to compensate for the missing fan
+  control** — that would cap the machine permanently, whereas `intel_pstate` can drop turbo
+  dynamically under load and restore it. Firmware keeps the ceiling; the OS chooses when to duck
+  under it.
+- **Hyper-Threading** — `[Enabled]`, `Advanced → CPU Configuration`. Keep: D28 puts 1–2 local
+  agents here and HT doubles logical cores. Same reasoning as Turbo.
+- **VMX (Intel Virtualization Technology)** — `[Enabled]`. This is *CPU* virtualisation (VT-x),
+  needed for any future VM work. It is **not** VT-d, and does not resolve the item below.
+- **`Bootup NumLock State [Off]`** — correct, and not cosmetic. D26 has every unattended reboot
+  parking at the LUKS passphrase prompt; on a keyboard with an embedded numeric keypad, NumLock
+  On can turn passphrase letters into digits.
+- **`Enable USB Charge Function [Disable]`** — USB power while the machine is off or asleep.
+  Already disabled; good for in-bag battery drain.
+- **TCG Storage Security (Opal SED)** — `Security → TCG Storage Security Configuration`, one
+  submenu per drive. Each offers only `Set Admin Password` and `Set User Password`, and **both
+  are unset on both drives**. Opal is supported but has never been enabled or locked, so nothing
+  here will ambush the M3 install. **Leave unset**: the design is committed to LUKS (D26), and
+  an Opal password is a second unlock secret outside it. Hazard, recorded so nobody tries it:
+  a lost Opal password requires a **PSID revert, which erases the drive**.
+- **UEFI Network Stack** — found **already `Disabled`**, which is the desired state. The design
+  never network-boots, and it is pre-boot attack surface running at full firmware privilege.
+  Recorded so that a firmware update re-enabling it is detectable.
+
+### VT-d / IOMMU — correction: the state is NOT established
+
+*This section previously asserted "VT-d — leave enabled. The Thunderbolt `iommu` policy depends
+on it." That assertion is withdrawn as stated.*
+
+**There is no VT-d toggle anywhere in this firmware.** `Advanced → CPU Configuration` contains
+only `VMX` and `Hyper-Threading`; the Chipset tab has no System Agent submenu.
+
+The evidence previously cited is `policy: iommu` at line 50 of
+`tensorbook-20260901T124921Z-diagnosis.md` — that is **boltd's stored policy**, not a read of
+VT-d state. bolt selects that policy when the system reports IOMMU DMA protection, so it is
+strong evidence, but it is one inference removed and a stored policy persists from whenever it
+was set. The first raw capture contains **zero** `iommu` mentions; the string appears only in the
+follow-up.
+
+**Settle it by direct measurement, not by menu archaeology:** `scripts/verify-firmware.sh`
+reads `/sys/class/iommu/`, the DMAR kernel messages, and
+`/sys/bus/thunderbolt/devices/domain0/iommu_dma_protection`. If `/sys/class/iommu/` is empty,
+the Thunderbolt DMA-protection reasoning above needs revising. Until that runs, treat VT-d's
+state as **unknown**.
 
 ### The graphics-mode trade-off, now that docking is a requirement (R18)
 
-This one has no obviously right answer and should be decided, not defaulted:
+Firmware confirms the current setting is `NVIDIA(R) Optimus(TM)` — hybrid. The trade-off stands
+and should be decided, not defaulted:
 
-- **Keep hybrid** (current): the internal panel is on the Intel iGPU, so a broken NVIDIA driver does
-  not black out the laptop screen — measured, and the reason §12 calls the rescue story milder than
-  assumed. Better battery life. Cost: external outputs on the NVIDIA connectors under a Wayland
-  compositor are the fiddlier path.
+- **Keep hybrid** (current): the internal panel is on the Intel iGPU, so a broken NVIDIA driver
+  does not black out the laptop screen — measured, and the reason §12 calls the rescue story
+  milder than assumed. Better battery life. Cost: external outputs on the NVIDIA connectors under
+  a Wayland compositor are the fiddlier path.
 - **Dedicated-GPU-only**: every output lands on one driver, which is usually simpler for external
   monitors. Cost: the internal panel then depends on the NVIDIA driver too, which **removes the
-  rescue advantage M0 just discovered**, and costs battery.
+  rescue advantage M0 discovered**, and costs battery.
 
-**Provisional recommendation: keep hybrid.** The rescue path is worth more to this design than an
-easier external-display setup, and §16.6 has not yet established that the dock even lands on an
-NVIDIA connector. Revisit if the M2 dock test shows otherwise.
+**Provisional recommendation: keep hybrid**, and it was left unchanged. Revisit only if the M2
+dock test (§16.6) shows the dock landing on an NVIDIA connector.
+
+### BIOS password — a §3.2 companion decision, not a separate one
+
+Both fields exist and both are unset; left unset. The decisive reason not to set one now is
+sequencing: **§3.2 requires returning to this menu** before M3 to toggle Secure Boot and measure
+hibernation, and a firmware password adds lockout risk to the very next planned firmware task.
+The security gain is also marginal — LUKS protects the data regardless, so a BIOS password
+defends against boot-order and setup tampering, i.e. the T7 evil-maid class this profile records
+as out of scope.
+
+**But decide it together with §3.2.** If Secure Boot is disabled for hibernation, the boot chain
+becomes unverified and the T1 residual ("boot tampering if the machine is recovered") worsens; a
+firmware password is then cheap partial compensation. If one is ever set: Clevo-class boards
+commonly store it outside CMOS, so a forgotten password may not be clearable by removing the
+battery.
 
 ### Firmware age
 
-BIOS **1.02, dated 2022-02-12** — 4.5 years old. Worth checking for an update, with two cautions:
-research found LVFS coverage for this class of chassis is poor, so `fwupdmgr` may not offer one; and
-vendor updaters are often Windows-only, which is awkward now that this machine no longer has
-Windows. Check `fwupdmgr get-devices` before assuming either way. A firmware update is also a
-plausible fix for the suspend quirks behind the unsafe-shutdown count — but it is a risk in itself,
-and nothing in the design currently depends on it.
+BIOS **1.02, dated 2022-02-12** — 4.5 years old; confirmed on the Main tab, so the machine has
+taken no unrecorded firmware update. Also recorded there: EC FW 1.00, MCU FW 1.00.02.00,
+iGFX GOP 17.0.1064, Memory RC 2.0.2.0, product version 7.04.
+
+Worth checking for an update, with three cautions now rather than two: research found LVFS
+coverage for this class of chassis is poor, so `fwupdmgr` may not offer one; vendor updaters are
+often Windows-only, which is awkward now that this machine no longer has Windows; and **a
+firmware update would likely reset every setting recorded above**, which is precisely why they
+are recorded. Check `fwupdmgr get-devices` before assuming either way. An update remains a
+plausible fix for the suspend quirks behind the unsafe-shutdown count, but it is a risk in
+itself, and nothing in the design currently depends on it.
 
 ---
 
