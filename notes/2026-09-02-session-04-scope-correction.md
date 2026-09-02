@@ -30,8 +30,11 @@ SSH is the interface. That one choice retires:
 
 Two new decisions in the same spirit:
 
-- **Do not stripe the drives.** RAID0 doubles the blast radius to buy a few seconds on model
-  load. Separate mounts instead, with `/srv/models` on the already heavily-written drive.
+- **Striping: recommended against, user overruled, striped.** I recommended separate mounts
+  (RAID0 doubles the blast radius to buy a few seconds on a model load). The user's call is
+  to stripe, so the spec does: md0 RAID0 -> LUKS -> btrfs with subvolumes. Two requirements
+  follow and are in the spec rather than left as advice: SMART on both drives surfaced on
+  the dashboard, and the exposure that striping plus an unprotected backup creates together.
 - **LM Studio is out.** Checked rather than assumed: the desktop app's headless mode "works
   on Mac, Windows, and Linux machines with a graphical user interface", so it cannot run
   here. Its server-native daemon `llmster` can, but installs by `curl | bash` with no stated
@@ -50,7 +53,10 @@ Two new decisions in the same spirit:
 ## Resume here
 
 1. User review of the box spec.
-2. Answer open question 3 (does the NAS run containers, for `rest-server --append-only`)
-   before writing the backup module.
+2. **NAS: no containers** (answered 2026-09-02). So no `rest-server --append-only`, and
+   threat T5 is no longer closed by the transport. Backups are restic over SFTP, and the
+   append-only property has to come from NAS-side snapshots instead. **Confirm those exist
+   before B7** -- if they do not, T5 is open and should be recorded as open. This matters
+   more now that the volume is striped: no redundancy and no protected backup at once.
 3. Then B1: base install, headless, SSH, Tailscale. Exit test is a reboot that comes back
    reachable by name with XHCI wake disabled.

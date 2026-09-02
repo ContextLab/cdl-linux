@@ -52,32 +52,46 @@ stops being a blocker and becomes an observation. Secure Boot stays **on**.
 | Secure Boot | **On** | Signed NVIDIA modules load; nothing here needs hibernation |
 | Swap | 8 GiB file | Sized for pressure relief, not for hibernation |
 
-### 2.1 Storage: two drives, not one striped volume
+### 2.1 Storage: one striped 2 TB volume
 
 The machine has two identical 1 TB NVMe drives, both healthy (`PASSED`, zero media errors,
-100 % spare). The archived design striped them as RAID0 for throughput.
+100 % spare, 2 % and 0 % endurance used). **They are striped into one ~2 TB volume**, which
+is the user's decision, taken against a recommendation to mount them separately.
 
-**Do not stripe them.** Mount them separately:
+The stack, bottom to top:
 
-| Mount | Drive | Holds |
-|-|-|-|
-| `/` | nvme1n1 (5.5 TB written, 0 % endurance used) | System, home, agent worktrees |
-| `/srv/models` | nvme0n1 (48 TB written, 2 % endurance used) | Model weights, datasets, checkpoints |
+```
+nvme0n1 + nvme1n1  ->  md0 (RAID0)  ->  LUKS  ->  btrfs
+                                                    @        -> /
+                                                    @home    -> /home
+                                                    @models  -> /srv/models
+```
 
-Three reasons, in order. **RAID0 doubles the probability that a single failure destroys
-everything.** What it buys in exchange is roughly halved read time when a model is loaded
-from disk, i.e. a few seconds on an operation that happens when a model is first pulled
-into memory and then not again while it stays resident. That is a poor trade against
-doubling the blast radius. The two drives are **unequally worn** (48 TB written versus
-5.5 TB), so striping ties the healthier drive's fate to the more heavily used one. Finally,
-model weights are re-downloadable, and keeping them on their own mount means a rebuild of
-`/` does not lose 200 GB of downloads.
+One `md` device means one LUKS container and one passphrase at boot. btrfs subvolumes then
+give the separation that separate mounts would have given, plus snapshots, without a second
+unlock. There is deliberately **no remote unlock**: an unattended reboot parks at the prompt
+rather than putting a credential on unencrypted `/boot`.
 
-Encryption: LUKS on `/` only. `/srv/models` holds nothing secret and encrypting it costs
-CPU on every model load. A passphrase at boot is acceptable because reboots are rare and
-planned; there is deliberately **no remote unlock** (the archived D26 rationale still
-holds: an unattended reboot parks at the prompt rather than putting a credential on
-unencrypted `/boot`).
+**What striping costs, recorded once so the trade is visible rather than argued.** Either
+drive failing destroys the volume, and the two drives are unequally worn (48 TB
+written on `nvme0n1` against 5.5 TB on `nvme1n1`), so the volume's life is governed by the
+more heavily used one. Two consequences follow and both are requirements rather than advice:
+
+- **SMART on both drives is monitored, and a warning is surfaced on the dashboard** (§8.1).
+  On a striped pair, the first sign of trouble on either device is the only warning there
+  will be.
+- **The backup becomes the only copy**, which lands awkwardly against
+  §10.1: the NAS runs no containers, so backups have no append-only protection yet. Until
+  the snapshot substitute in §10.1 is confirmed, this machine has **no redundancy and no
+  protected backup at the same time.** That is an exposure, it is stated here rather than
+  in a footnote, and confirming NAS snapshots is the cheapest thing that closes it.
+
+**A considered alternative, rejected for a practical reason.** Two LUKS devices with btrfs
+spanning both (`-d raid0 -m raid1`) would stripe data while mirroring metadata, so a
+single-device failure would leave a mountable filesystem that can at least enumerate what
+was lost. The Ubuntu installer cannot produce that layout, and building it by hand
+contradicts §3's stock-installer premise. It should be revisited if the storage layout is ever
+rebuilt outside the installer.
 
 ### 2.2 Two hardware findings that need OS-level fixes
 
@@ -236,7 +250,7 @@ It exists so that the state of the machine is glanceable from a phone.
 | **Model servers** | Ollama and `llama-swap` up or down, loaded model, requests served |
 | **Sessions** | `zellij` sessions, when each was started, and which agent CLI is running in it |
 | **Machine** | CPU temperature, `max_perf_pct` (so throttling is visible rather than mysterious), load, memory, disk free on both mounts |
-| **Storage** | `/srv/models` usage, largest models, last backup time and result |
+| **Storage** | Volume usage, largest models, last backup time and result, and **SMART status for both drives** (§2.1: on a striped pair this is the only early warning) |
 
 ### 8.2 What it can do
 
@@ -279,8 +293,43 @@ Theming for the shell side is configured on the box, and the client terminal's o
 
 ## 10. Backup
 
-`restic` to the QNAP/TrueNAS, on a timer, with `--exclude-caches` and `CACHEDIR.TAG`
-honoured.
+**`restic` over SFTP** to the NAS, on a timer, with `--exclude-caches` and `CACHEDIR.TAG`
+honoured. `restic -r sftp:user@nas:/path` needs only `sshd` on the far end and no software
+installed there, which is what makes it the right transport here.
+
+### 10.1 The NAS runs no containers, so append-only has to come from the storage layer
+
+**Decided 2026-09-02.** The archived design's primary choice was `restic` talking to
+`rest-server --append-only` in a container on the NAS, which closed threat T5 (a stolen
+backup credential) on the strength of rest-server's own guarantee: it *"allows creation of
+new backups but prevents deletion and modification of existing backups"*. The NAS does not
+run containers, so that option is gone and **T5 is not closed by the backup transport any
+more**.
+
+This is a genuine loss and the spec says so rather than substituting a weaker claim. Over
+SFTP the laptop's key has full write access to the repository path. Anyone who takes the
+machine can run `restic forget --prune`, or simply delete the files, and the history goes
+with it. Encryption does not help: the repository password is on the laptop by necessity.
+
+**The substitute is NAS-side snapshots**, which give the same property from underneath
+instead of from the protocol. A scheduled snapshot of the backup dataset cannot be deleted
+by a client that has no administrative access to the NAS, so a wiped repository is
+recoverable from the most recent snapshot. Conceptually, the storage layer becomes the
+append-only layer.
+
+Two conditions have to hold for that to work, and neither is assumed:
+
+- The NAS must actually be snapshotting the dataset that holds the repository, on a schedule,
+  with a retention window longer than the gap between backup checks. If it is not, T5 is
+  simply open and should be recorded as open.
+- The laptop's SSH credential must not be able to reach the snapshots. In practice this
+  means a dedicated unprivileged user, chrooted to the repository path via
+  `ForceCommand internal-sftp`, and no NAS administrative access from that account.
+
+**Retention pruning now runs from the laptop**, because there is no NAS-side component to
+run it. That is the direct consequence of the same change: the machine being backed up is
+also the machine that deletes old snapshots, which is exactly the arrangement rest-server
+existed to avoid.
 
 - `/home` and `/etc` are backed up.
 - **`/srv/models` is not**, by default. Model weights are large and re-downloadable, and
@@ -289,6 +338,9 @@ honoured.
   backed up.
 - A restore drill is part of the acceptance criteria, not a later exercise. A backup nobody
   has restored from is a hypothesis.
+- **The snapshot path is drilled too**, once: delete something from the repository
+  deliberately, then recover it from a NAS snapshot. That is the only way to find out
+  whether §10.1's substitute works before it is needed.
 
 ## 11. Build order
 
@@ -313,5 +365,5 @@ Each milestone has an exit test, not a judgement.
 |-|-|-|
 | 1 | Which GPU drives the dock's external display | Deferred from M0, and it only matters if a monitor is ever attached to this box. On a headless server it may never need answering. |
 | 2 | Whether `croft` and the Emacs LLM integration are still wanted | Both came from the original requirements list, which predates the headless decision. |
-| 3 | Whether the NAS supports `rest-server` in a container | Determines whether backups use `restic`'s REST backend with `--append-only`, or fall back to SFTP. Probe before writing the backup module. |
+| 3 | **Does the NAS snapshot the backup dataset, and can the laptop's credential reach those snapshots?** | Answered in part: the NAS runs no containers, so `rest-server --append-only` is out and transport is SFTP (§10.1). What is still open is whether the snapshot substitute exists. If the answer is no, threat T5 is open rather than mitigated, and the honest move is to record it as open instead of describing the backup as protected. Check before B7. |
 | 4 | Whether `zellij` scrollback loss is tolerable in practice | If it is not, the answer is per-session `script(1)` logging rather than the archived supervisor design. |
