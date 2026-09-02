@@ -1,6 +1,7 @@
 # `cdl-agent-lifecycle` — Component Specification
 
-**Status:** draft 3. Reviewed twice (2026-09-02, both rounds); findings and resolutions in §21.
+**Status:** draft 6. Reviewed five times (2026-09-01 to 2026-09-02; rounds 3, 4 and 5 by cold
+reviewers with no conversation context). Findings and resolutions in §22.
 **Commissioned by:** `docs/superpowers/specs/2026-08-31-cdl-design.md` ("the overview") §7, which says of this
 component: *"Write this one first — it holds the differentiating functionality and drives M1."*
 **Design decisions taken during this spec:** `notes/2026-09-01-session-03-agent-lifecycle-design.md`
@@ -213,6 +214,22 @@ Two consequences the implementation must respect, because ~16 supervisors share 
   and §19.2's controller does its probing outside one, for exactly this reason.
 - **`SQLITE_BUSY` is retried with backoff, and a retry that exhausts its budget is an error the
   caller sees** — never a silently skipped state write, which would break §3.5 invariant 1.
+
+### 3.4.1 Leaving `waiting` clears `waiting_source`
+
+`waiting_source` says which detector (§9.3) is *currently* holding a unit in `waiting`, and §15.2
+renders it. It is therefore current state rather than history, and the schema enforces the pairing
+(§5.2). **Every transition out of `waiting` sets `waiting_source = NULL` in the same `UPDATE`**:
+
+```sql
+UPDATE unit SET state='running', waiting_source=NULL WHERE id=? AND state='waiting';
+```
+
+Two drafts got this wrong in opposite directions, which is worth recording because both looked
+reasonable. Draft 4 added the constraint and no clearing rule, so `waiting` became a state nothing
+could leave. Draft 5 removed the constraint, which unblocked the transitions and left §18.3
+asserting a rule the database no longer enforced. **A constraint and the rule that satisfies it
+have to ship together**; either alone is a defect.
 
 ### 3.5 Two invariants, and honestly which is enforced where
 
@@ -429,11 +446,23 @@ its supervisor. Whichever commits first wins, and the loser can tell that it los
 
 **A backwards clock must not strand a row.** `launch_deadline < :now` is the only exit from
 `starting` with a null acknowledgement, so a clock stepping backwards leaves `L0` answering
-*"leave it alone"* forever, holding a GPU lease and a §14 slot. `L0` therefore carries a second,
-clock-independent bound: a `starting` row whose `created_at` is older than a hard maximum
-(default 1 h, always far above `launch_deadline`) is resolved `launch_failed` whatever the
-deadline comparison says. Timestamps compare in the one pinned format §5.2 fixes; comparing them
-as free-form text is measurably wrong.
+*"leave it alone"* forever, holding a GPU lease and a §14 slot.
+
+The bound that fixes this has to be **boot-aware, not another wall-clock comparison**. Draft 5
+added a `created_at` ceiling and called it clock-independent, which it is not: `created_at` and
+`now` are both wall-clock timestamps, so a backward step moves them together and the row stays
+stranded. What actually resolves it:
+
+1. **A row whose `boot_id` differs from the current boot is resolved immediately**, whatever its
+   deadline says. Nothing from a previous boot is still launching, and this needs no clock at all.
+2. **Within one boot, ask systemd rather than the clock.** If the transient unit is gone
+   (`systemctl --user is-active` says so), the launch is over regardless of what the timestamps
+   claim. The unit's own activation time is available from systemd and is not the same source as
+   `now`.
+3. A generous wall-clock ceiling stays as a **heuristic backstop**, described as one.
+
+Timestamps compare in the one pinned format §5.2 fixes; comparing them as free-form text is
+measurably wrong.
 
 ---
 
@@ -475,7 +504,13 @@ CREATE TABLE schema_version (
 --     '2026-09-01 10:00:00'   < '2026-09-01T09:00:00Z'    ->  1   (should be 0)
 -- Both measured. §4.5's `launch_deadline < :now` is an inequality on one of these columns, so
 -- an unpinned format is a correctness bug in the launch handoff, not a formatting preference.
--- One helper in the write layer produces every timestamp; nothing formats one inline.
+-- ENFORCEMENT, stated precisely: the WRITE LAYER guarantees this format for every timestamp
+-- column, through one helper that nothing bypasses. The SCHEMA checks only the columns an
+-- inequality is evaluated against -- launch_deadline below -- because those are where a bad
+-- format changes a decision rather than only a display. Draft 5 claimed every column was
+-- enforced while exactly one CHECK existed.
+-- The GLOB below validates SHAPE, not calendar validity: '2026-13-45T99:99:99.999Z' passes it.
+-- That is deliberate and sufficient, because shape is what lexicographic comparison needs.
 
 CREATE TABLE unit (
     id                  TEXT PRIMARY KEY,          -- ULID: sorts by creation time
@@ -509,7 +544,8 @@ CREATE TABLE unit (
     probe_status        TEXT CHECK (probe_status IN ('alive','dead','unreachable')),
 
     queued_reason       TEXT,                      -- what a queued unit is waiting for (§14, §15.2)
-    waiting_source      TEXT CHECK (waiting_source IN ('adapter','idle')),  -- §9.3, §15.2
+    waiting_source      TEXT CHECK (waiting_source IN ('adapter','idle')),  -- §9.3, §3.4.1
+    log_degraded        INTEGER NOT NULL DEFAULT 0,   -- §20.1: log writes are failing
     recovered_at        TEXT,                      -- set when §7.3.1 rebuilt this row
     egress_allow        TEXT,                      -- JSON array of permitted hostnames (§12.2)
 
@@ -569,13 +605,13 @@ CREATE TABLE unit (
     CHECK ((state = 'terminal') = (ended_at IS NOT NULL)),
     -- §3.3: a job has no human in the loop, so it can never be `waiting`. The database
     -- refused nothing here until draft 4; the rule existed only in prose.
-    CHECK (NOT (kind = 'job' AND state = 'waiting'))
-    -- NO biconditional on waiting_source. Draft 4 had
-    --   CHECK ((state='waiting') = (waiting_source IS NOT NULL))
-    -- which made `waiting` a TRAP STATE: every exit from it -- to running, to stopping, to
-    -- terminal -- failed the constraint, because no transition cleared the column. Measured.
-    -- waiting_source is a record of the detector that most recently moved this unit into
-    -- `waiting` (§9.3); it is read only while state='waiting' and ignored otherwise.
+    CHECK (NOT (kind = 'job' AND state = 'waiting')),
+    -- waiting_source is CURRENT state, not history: set on entering `waiting`, cleared on
+    -- every exit, in the same UPDATE. Draft 4 added this constraint without the clearing rule
+    -- and made `waiting` a TRAP STATE -- every exit failed, measured on all three transitions.
+    -- Draft 5 dropped the constraint instead, which left §18.3 asserting a rule the database
+    -- no longer had. The constraint is right; it just needs §3.4.1 stated alongside it.
+    CHECK ((state = 'waiting') = (waiting_source IS NOT NULL))
 );
 
 CREATE INDEX unit_attention  ON unit(state) WHERE state = 'waiting';
@@ -1629,8 +1665,9 @@ The four cases draft 2 could not distinguish:
 Run against a fresh database built from §5.2's DDL, since these are the rules an implementer would
 otherwise have to remember: a `job` in `waiting` is rejected; a second `schema_version` row is
 rejected (with `UNIQUE constraint failed`, not `CHECK` — draft 4's test named the wrong error); an `actor` outside the five is rejected; `state='terminal'` with a null `outcome` or null
-`ended_at` is rejected; `waiting` without a `waiting_source` is rejected. Each must fail with a
-`CHECK constraint failed`, not merely be avoided by convention.
+`ended_at` is rejected; `waiting` without a `waiting_source` is rejected, **and so is leaving `waiting`
+without clearing it** (§3.4.1) — that second half is what draft 4 omitted, turning the constraint
+into a trap. Each must fail with a `CHECK constraint failed`, not merely be avoided by convention.
 
 **And the sequence §6.1 depends on**: create a worktree, a port block and a terminal unit
 referencing both; run §6.1 step 4 in one transaction; it **succeeds**, the unit row survives with
@@ -1825,6 +1862,35 @@ until step 4. Corrected:
    (§19.2), which is the ownership transfer. Until it commits, admission still owns the row and
    `L0`/`L0′` govern it exactly as they do locally.
 
+#### 19.4.1 Why the remote launch needs two phases
+
+**Locally, the supervisor acknowledges before it `exec`s, so a supervisor that loses the
+compare-and-swap race can simply exit and nothing ran.** Remotely that reasoning does not carry.
+The controller cannot acknowledge until the remote process has started and reported its pid, so by
+the time it loses the race the remote supervisor may already have `exec`'d the job. Draft 5 said
+*"the losing supervisor exits without `exec`ing"* without noticing that the sentence is only true
+for `backend = 'local'`. The result would be a local row reading `terminal(launch_failed)` while an
+untracked process keeps running on the GPU host, holding VRAM nothing will reclaim.
+
+The remote supervisor therefore starts **pre-`exec`** and waits for a decision:
+
+| Phase | Who | What happens |
+|-|-|-|
+| 1 | controller | Start the remote supervisor. It sets up its directory, records its pid and boot id, and **blocks before `exec`** |
+| 2 | controller | Attempt the local acknowledgement compare-and-swap (§4.5) |
+| 3a | controller, on **win** | Send `commit`, authenticated by `unit_id` + `launch_id`. Only now does the remote supervisor `exec` the agent |
+| 3b | controller, on **loss** | Send `abort`, same authentication. The remote supervisor exits without `exec`ing, and the controller **verifies termination** before it stops watching |
+| 4 | remote supervisor | If neither decision arrives within its own timeout (default twice `launch_deadline`), **abort**: exit without `exec`ing |
+
+Phase 4 is what makes the protocol safe when the *controller* is what died: a remote supervisor
+that is never told anything gives up rather than running work nobody is tracking. The authentication
+matters for the same reason `launch_id` exists locally — a `commit` from a superseded attempt must
+not start a job the registry has already written off.
+
+**An aborted launch keeps its remote directory**, marked in the abort record, because a launch that
+raced and lost is exactly the case someone will want to inspect. `cdl job gc` collects it on the
+usual schedule (§19.10).
+
 **Idempotency is by the unit id, and it has to be**, because the failure that actually happens is the
 ssh connection dropping *after* the remote process started but *before* cdl learned its pid. Re-running
 launch for the same unit id finds the marker file, adopts the running process, and starts nothing
@@ -1857,15 +1923,24 @@ mode 0600, containing:
 | `artifacts[]` — path, bytes, `sha256` | The manifest §19.8 fetches against. Digests are computed on the remote, where the bytes are. |
 | `record_sha256` | A digest over the rest of the record, so a partial write is detectable rather than plausible. |
 
+**The whole import is one transaction.** The unit's terminal transition, its `unit_event`, every
+artifact row and every spend row commit together or not at all. A partial import is the state
+reconciliation cannot reason about: a `completed` row whose artifacts are missing is
+indistinguishable from a job that produced none, and §13.2's ceiling would silently under-count.
+
 **Importing it is idempotent, not merely deduplicated.** `R3` may run twice — two reconcilers, or
 one retried after a crash between the import and the commit — so every insert derived from this
 record uses `INSERT … ON CONFLICT DO NOTHING` against the uniqueness indexes in §5.2. A bare
 `INSERT` would raise `UNIQUE constraint failed` and abort the whole `R3` transaction, so the
 second attempt would fail to import a result the first had already half-written.
 
-**It is written atomically**: to a temporary file in the same directory, `fsync`, then `rename`.
-A `rename` within one filesystem is atomic, so a reader sees either no record or a whole one —
-never a half-written one that parses. This matters more than it looks: the failure being designed
+**It is written atomically and durably**, which are two requirements and need three steps: write
+to a temporary file in the same directory, `fsync` **the file**, `rename`, then `fsync` **the
+parent directory**. A `rename` within one filesystem is atomic, so a reader sees either no record
+or a whole one, never a half-written one that parses. But atomicity is not durability: until the
+directory entry itself is flushed, a power loss can lose the rename and leave the temporary file
+behind. Draft 5 stopped at the first `fsync`, which is enough for a crash and not enough for the
+power loss this record exists to survive. This matters more than it looks: the failure being designed
 against is the remote host losing power *while writing the result*, and a torn JSON file that
 happens to parse would be imported as fact.
 
@@ -1936,6 +2011,12 @@ the first byte.
   never blocks the PTY reader: a supervisor that cannot write its log **keeps the agent running** and
   records the failure, because losing the transcript is bad and killing working agents to protect a
   log is worse.
+- **"Records the failure" needs a path that survives the cause.** The commonest reason a log write
+  fails is a full filesystem, and the registry usually sits on that same filesystem, so the obvious
+  place to record it may be unavailable at exactly that moment. The supervisor therefore writes to
+  **journald first**, which has its own space accounting, and sets a persistent `log_degraded` flag
+  on the unit row only if the database is still writable. `cdl status` shows the flag; `cdl doctor`
+  reads journald, so the failure is visible either way.
 - **Retention is tied to the worktree, not to a timer.** A unit's logs live until its worktree is
   collected (§6.1) or a configurable age passes, whichever is later. The transcript is usually
   needed exactly when the work is being reviewed.
@@ -2200,6 +2281,28 @@ The findings that were not simply mechanical:
 | **T4a was cited as overview §12**, which is *Session and display*; it is overview §5 | §12.2 |
 | Four spellings of the systemd unit name; `attach`'s documented default contradicted §4.3.1 | §4.1/§7.3.1/§7.6/§20.5; §15.1 |
 | **The acceptance suite was inadequate.** Several tests passed on a broken implementation, one had an impossible setup, and fourteen stated guarantees had no test at all | §18 throughout; new §18.8 |
+
+### 22.6 Review of draft 5
+
+Verdict: *"no longer an architectural thesis searching for a buildable core"*, with the local
+slice called nearly implementation-ready and one substantive remote race outstanding.
+
+| Finding | Resolved in |
+|-|-|
+| **A remote acknowledgement that loses the deadline race orphans work.** Locally a losing supervisor exits before `exec`, but the controller cannot acknowledge until the remote process has already started, so the local row could read `launch_failed` while an untracked job kept running | §19.4.1: a two-phase launch. The remote supervisor blocks pre-`exec`; the controller sends `commit` only after winning the local CAS, `abort` if it loses, and verifies termination. A supervisor told nothing times out and aborts itself |
+| **§18.3 asserted a constraint draft 5 had removed** — `waiting` without a `waiting_source` | §5.2 restores the constraint **and** §3.4.1 states the clearing rule that makes it survivable. Draft 4 had the constraint without the rule (a trap state); draft 5 had neither |
+| **The "clock-independent" bound compared two wall clocks**, so a backward step still stranded the row | §4.5: boot-aware resolution first, systemd's own view of the unit second, and a wall-clock ceiling described as the heuristic it is |
+| **Timestamp enforcement was overstated** — every column claimed, one checked | §5.2 says the write layer guarantees the format and the schema checks the comparison-critical column, and notes the `GLOB` validates shape rather than calendar validity |
+| **`fsync` + `rename` is not durable across power loss** without also flushing the parent directory | §19.6 |
+| A valid remote result whose artifact or spend import partly conflicts | §19.6: the transition, event, artifacts and spend commit in one transaction |
+| A log write failing because the filesystem is full also blocks recording the failure in a database on that filesystem | §20.1: journald first, then a `log_degraded` flag if the database is still writable |
+| Document status said draft 3 | Header |
+
+**Executable tests now exist** (`tests/test-schema.py`, 23 cases), extracting the DDL from this
+document at run time so the two cannot drift: every permitted transition, every prohibited one,
+`waiting` entry and exit, the §6.1 removal sequence and reuse, duplicate imports, and all four
+launch-window compare-and-swap races. Writing them found a bug in the runner itself — the new
+suite was piped to `tail`, so a failing test would have reported success.
 
 ---
 

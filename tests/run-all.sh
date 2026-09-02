@@ -45,6 +45,20 @@ for suite in tests/test-*.sh; do
     fi
 done
 
+# Python suites. The schema tests extract the DDL from the spec and run it, because the
+# defects that survived longest in review were all cases where prose and schema disagreed
+# and only executing the SQL could tell.
+for suite in tests/test-*.py; do
+    [[ -e "$suite" ]] || continue
+    suites_run=$((suites_run + 1))
+    printf '\n--- %s ---\n' "$suite"
+    # No pipe: piping to `tail` would make the exit status tail's, so a failing suite
+    # would report success. unittest prints its summary to stderr already.
+    if ! python3 "$suite"; then
+        suites_failed=$((suites_failed + 1))
+    fi
+done
+
 printf '\n\033[1m== summary ==\033[0m\n'
 printf '  shell files linted: %d\n' "$lint_files"
 printf '  test suites run:    %d\n' "$suites_run"
