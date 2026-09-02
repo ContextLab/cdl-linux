@@ -117,3 +117,24 @@ avoidance"), while assembling a specific agent's environment from it belongs her
   store location, provider key entry and validation.
 - `cdl-agent-lifecycle` owns: GPU **admission**, which model is resident when, the llama-swap
   endpoint contract, and per-agent environment construction.
+
+### DA5 — Claude Code against a local endpoint: allowed, explicit, warned
+*User-chosen, 2026-09-02.* Claude Code defaults to the Anthropic API. Routing it at llama-swap is
+supported but **per-agent only** and prints what it costs — Remote Control and voice dictation —
+before the agent starts. The other three CLIs route to llama-swap without ceremony, having nothing
+to lose. This keeps the capability while removing the silence that F4 warned about.
+
+### Licence verification (closes the F3 gap), `gh api repos/<r>`, 2026-09-02
+
+| Repo | SPDX | Ships in the image? |
+|-|-|-|
+| `google-gemini/gemini-cli` | **Apache-2.0** | Yes — the research's unresolved gap, now closed |
+| `openai/codex` | Apache-2.0 | Yes (confirms round1-digest:32) |
+| `sst/opencode` | MIT | Yes (confirms round1-digest:326) |
+| `anthropics/claude-code` | **none** | **No** — fetch-on-demand; the empty licence field is direct confirmation of round1-digest:324 |
+| `mostlygeek/llama-swap` | MIT | Yes |
+| `ggml-org/llama.cpp` | MIT | Yes |
+
+**Three of four agent CLIs are redistributable.** Only Claude Code needs the vendor-installer path.
+This is a packaging fact and belongs to `cdl-install-and-packaging`; recorded here because DA3
+depends on it and because the research left it open.
