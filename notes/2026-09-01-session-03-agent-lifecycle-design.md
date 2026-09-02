@@ -1,4 +1,4 @@
-# Session 03 (2026-09-02): designing `cdl-agent-lifecycle`
+# Session 03 (2026-09-01): designing `cdl-agent-lifecycle`
 
 Resume item 2 from `notes/2026-08-31-session-02-spec-review.md`. Brainstorming path:
 **architectural** (new subsystem, no existing flow in the repo, defines interfaces other
@@ -12,7 +12,7 @@ Context read before starting: design overview §7 (commissioning brief), §8 (ar
 ## Design decisions taken so far
 
 ### DA1 — Spec scope: the full commissioning brief
-*User-chosen, 2026-09-02.* The spec covers everything §7 assigns the component: agent **and job**
+*User-chosen, 2026-09-01 (local; UTC 2026-09-02).* The spec covers everything §7 assigns the component: agent **and job**
 state machines, PTY ownership and attachment, blocked/waiting/complete detection, exit status,
 prompt and launch-command recording, cancellation, worktree ownership and crash reconciliation,
 resume without replay, sandbox filesystem and network policy (T4a/T4e), port allocation registry,
@@ -26,7 +26,7 @@ backend interface are the expensive things to change later, and D28's three loca
 three locations avoids a rewrite when the GPU host and cloud arrive.
 
 ### DA2 — PTY ownership: a cdl-owned supervisor holds the master
-*Recommended by Claude, user deferred to the recommendation, 2026-09-02.*
+*Recommended by Claude, user deferred to the recommendation, 2026-09-01.*
 
 `cdl-agent@.service` runs `cdl-agent-supervisor` as the unit's **main process**. It opens the PTY,
 spawns the agent as its child, tees the master through to an append-only log, and serves
@@ -58,7 +58,7 @@ minimum sandbox boundary · blocked/waiting detection · `cdl status` contract �
 port allocation · cancellation semantics · worktree retention · job layer and backend split.
 
 ### DA3 — Agent CLIs and model providers in scope
-*User-chosen, 2026-09-02.* Two axes, deliberately separated:
+*User-chosen, 2026-09-01 (local; UTC 2026-09-02).* Two axes, deliberately separated:
 
 - **Agent CLIs (supervised programs):** Claude Code, Codex, Gemini, OpenCode
 - **Model providers (where inference happens):** Ollama, LM Studio, HuggingFace (cloud *and* local)
@@ -68,7 +68,7 @@ adapter interface is therefore load-bearing, and the spec must state which (agen
 pairs are supported rather than implying all of them.
 
 ### DA4 — Local serving: one endpoint, many models (llama-swap)
-*User-chosen, 2026-09-02.* Reconciles §8's "one inference server ... behind a `flock` semaphore",
+*User-chosen, 2026-09-01 (local; UTC 2026-09-02).* Reconciles §8's "one inference server ... behind a `flock` semaphore",
 which three competing servers would have contradicted. Ollama / LM Studio / HF become **model
 sources** (places weights come from), not competing servers.
 
@@ -119,12 +119,12 @@ avoidance"), while assembling a specific agent's environment from it belongs her
   endpoint contract, and per-agent environment construction.
 
 ### DA5 — Claude Code against a local endpoint: allowed, explicit, warned
-*User-chosen, 2026-09-02.* Claude Code defaults to the Anthropic API. Routing it at llama-swap is
+*User-chosen, 2026-09-01 (local; UTC 2026-09-02).* Claude Code defaults to the Anthropic API. Routing it at llama-swap is
 supported but **per-agent only** and prints what it costs — Remote Control and voice dictation —
 before the agent starts. The other three CLIs route to llama-swap without ceremony, having nothing
 to lose. This keeps the capability while removing the silence that F4 warned about.
 
-### Licence verification (closes the F3 gap), `gh api repos/<r>`, 2026-09-02
+### Licence verification (closes the F3 gap), `gh api repos/<r>`, 2026-09-01
 
 | Repo | SPDX | Ships in the image? |
 |-|-|-|
