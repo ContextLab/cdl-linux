@@ -111,8 +111,24 @@ ran 2026-09-01, publishing itself to the repo automatically (commit `1b7fb86`).
 
 ## Resume here
 
-1. **Close the firmware gate.** Reboot into setup and record: Intel VMD/RST vs AHCI; graphics mode;
-   **whether Secure Boot can be disabled** (now load-bearing for D29); BIOS password state.
+1. ~~**Close the firmware gate.**~~ ✅ **DONE 2026-09-02.** AMI Aptio V walked item by item; all
+   13 checklist items closed. Full record: `notes/hardware/firmware-gate-checklist.md`.
+   Answers: VMD **off** (installer will see both disks); graphics **Optimus/hybrid**; Secure Boot
+   **can** be disabled, and reversibly, so §3.2 is a real decision that can be *measured* rather
+   than argued; BIOS passwords **unset**. One change made: **Fast Boot disabled**.
+
+   **The finding that matters most: four of the six recommended changes do not exist.** This
+   firmware is heavily stripped, and every absence pushes work onto the OS spec. Three new
+   obligations fall on `cdl-first-boot-and-environment`:
+   - **`bolt`/`boltctl` is a HARD dependency.** Firmware exposes no Thunderbolt security policy
+     at all, so if boltd is missing after the reinstall the dock cannot be authorised and no
+     firmware setting can rescue it. Currently satisfied (1 device stored); the risk is carrying
+     it across M3.
+   - **XHCI wake must be disabled and made persistent.** Measured armed at S3, which is what this
+     machine suspends to — the mechanism behind the 65–66 unsafe shutdowns is confirmed present.
+     `/proc/acpi/wakeup` resets every boot, so a systemd unit or udev rule is required.
+   - **§16.5's thermal policy must rest entirely on throttling.** No fan control exists in
+     firmware *or* OS. Confirmed implementable: `no_turbo` and `max_perf_pct` are writable.
 2. **Write `cdl-agent-lifecycle`** — the correct first component spec; needs no hardware facts.
    First vertical slice only: one local interactive agent → PTY allocated → registry entry →
    attach/detach → terminal destroyed → reattach → exit status and logs retained → no prompt replay.

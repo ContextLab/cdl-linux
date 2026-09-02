@@ -4,6 +4,8 @@ Closes item 1 of "Resume here" (`notes/2026-08-31-session-02-spec-review.md`).
 Settings described by **function**, not menu name — names differ between firmware revisions.
 **An absence is a finding:** if a setting is not exposed, record that.
 
+**COMPLETE 2026-09-02 — all 13 items closed.**
+
 Started: 2026-09-01. Machine: TensorBook (late 2021), BIOS 1.02 dated 2022-02-12.
 
 | # | Item | Action | Status | Observed value |
@@ -16,7 +18,7 @@ Started: 2026-09-01. Machine: TensorBook (late 2021), BIOS 1.02 dated 2022-02-12
 | 5 | Fan / cooling profile | **Change** → most aggressive | ➖ | **ABSENT — no fan/thermal setting exists in this firmware** |
 | 6 | Fast Boot | **Change** → disable | ⬜ | |
 | 7 | Wake on USB / XHC wake | **Change** → disable if exposed | ➖ | **ABSENT.** Only `Legacy USB Support [Enabled]` exists — kept |
-| 8 | Thunderbolt / USB4 security level | **Change** → lower, or pre-authorise dock | ➖ | **No security level exposed.** Master toggle only, `[Enabled]` — kept |
+| 8 | Thunderbolt / USB4 security level | **Change** → lower, or pre-authorise dock | ✅ | No level exposed; dock **confirmed enrolled** (1 stored device) |
 | 9 | Sleep mode S3 vs Modern Standby | Verify S3 stays selected | ✅ | No selector exposed; `deep` already selected & cannot be flipped |
 | 10 | VT-d / IOMMU | Verify **enabled**, leave alone | ✅ | **MEASURED ACTIVE** — 4 DMAR units, TB DMA protection `1` |
 | 12 | UEFI Network Stack *(added mid-walk)* | **Change** → disable | ✅ | **Already `Disabled`.** Desired state; no change made |
@@ -409,7 +411,9 @@ The device count printed `0` twice and cannot be trusted:
 2. `grep -c` prints `0` **and** exits 1 on no matches, so the `|| echo 0` fallback appended a
    second zero to the field. Removed.
 
-**The reported "0 stored devices" is therefore not evidence that the dock is unenrolled.**
-Re-measure before drawing any conclusion - the 2026-09-01 follow-up saw the T4801 stored with
-`policy: iommu`, and boltd stores devices persistently. Also added: TB domain0 security level,
+**The reported "0 stored devices" was a defect in the check, not a finding.** Re-measured
+2026-09-02 with the corrected expression: **`boltctl list | grep -c 'uuid:'` returns 1**. The
+T4801 dock is still enrolled, consistent with the 2026-09-01 follow-up seeing it stored with
+`policy: iommu`. **Item 8's hard dependency is satisfied as things stand**, and the risk is
+entirely about carrying it across the M3 reinstall. Also added: TB domain0 security level,
 the only place firmware's Thunderbolt policy is visible given item 8.

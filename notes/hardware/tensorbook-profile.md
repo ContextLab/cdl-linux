@@ -5,10 +5,10 @@
 note the machine has taken a kernel update since the first capture). Published as
 `notes/hardware/tensorbook-20260901T124921Z-diagnosis.md`.
 
-**Status: the M0 firmware gate is CLOSED.** Every command-capturable item was recorded by the
+**Status: M0 is COMPLETE.** The firmware gate closed 2026-09-02. Every command-capturable item was recorded by the
 captures; the firmware observations were made by walking AMI Aptio V setup on 2026-09-01 and are
-recorded in `notes/hardware/firmware-gate-checklist.md`. Outstanding: one post-reboot measurement
-(VT-d, via `scripts/verify-firmware.sh`), and the dock connector question, deliberately deferred
+recorded in `notes/hardware/firmware-gate-checklist.md`. Post-reboot verification ran 2026-09-02
+(`scripts/verify-firmware.sh`). Only the dock connector question remains, deliberately deferred
 to M2 (§16.6).
 **Raw capture:** `notes/hardware/tensorbook-<date>-raw.md` — gitignored, retained off-machine.
 
@@ -258,7 +258,7 @@ VMD/RAID-class controller in `lspci`.*
 | Previously recommended | Reality | Consequence |
 |-|-|-|
 | "Set the most aggressive cooling profile available" | **No fan, thermal or cooling-profile setting exists anywhere in this firmware** (Advanced, Chipset, and Power and Performance all searched) | Combined with the measured 0 fan inputs and 0 writable PWM, there is **nowhere in this system, firmware or OS, to influence fans**. §16.5's sustained-load policy must rest *entirely* on throttling and refusal-to-launch. This is no longer a fallback; it is the only mechanism |
-| "Lower the Thunderbolt/USB4 security level" | **No security level is exposed.** `Advanced → Thunderbolt Configuration` contains one line, `Integrated Thunderbolt Support [Enabled]` | Authorisation lives wholly in `boltd`. **`bolt`/`boltctl` is now a HARD dependency for M3**: if it is absent after the reinstall, or its database does not carry across, the dock cannot be authorised and **no firmware setting can rescue it** |
+| "Lower the Thunderbolt/USB4 security level" | **No security level is exposed.** `Advanced → Thunderbolt Configuration` contains one line, `Integrated Thunderbolt Support [Enabled]` | Authorisation lives wholly in `boltd`. **`bolt`/`boltctl` is now a HARD dependency for M3**: if it is absent after the reinstall, or its database does not carry across, the dock cannot be authorised and **no firmware setting can rescue it**. Measured 2026-09-02: `boltctl` present, **1 device stored** — satisfied today; the risk is carrying it across the reinstall |
 | "Disable Wake on USB / XHC wake if exposed" | **Not exposed.** `Advanced → USB Configuration` contains one line, `Legacy USB Support [Enabled]`. No wake-from-Thunderbolt either | The spurious-wake hypothesis for the 65–66 unsafe shutdowns is testable and fixable **only** via `/proc/acpi/wakeup`, and any fix must be made persistent by cdl-linux, because that file resets every boot |
 | "Keep S3 — verify it stays selected" | **No S3 / Modern Standby selector exists** | Benign absence: `mem_sleep` already reads `s2idle [deep]`, the outcome we wanted, and nothing can now flip it by accident |
 
