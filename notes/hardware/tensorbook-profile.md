@@ -8,8 +8,9 @@ note the machine has taken a kernel update since the first capture). Published a
 **Status: M0 is COMPLETE.** The firmware gate closed 2026-09-02. Every command-capturable item was recorded by the
 captures; the firmware observations were made by walking AMI Aptio V setup on 2026-09-01 and are
 recorded in `notes/hardware/firmware-gate-checklist.md`. Post-reboot verification ran 2026-09-02
-(`scripts/verify-firmware.sh`). Only the dock connector question remains, deliberately deferred
-to M2 (§16.6).
+(`scripts/verify-firmware.sh`). The last exit criterion — RAM-derived swap sizing — was decided
+2026-09-02 as **D36, 136 GiB** ("Decisions this capture forces" below). Only the dock connector
+question remains, deliberately deferred to M2 (§16.6).
 **Raw capture:** `notes/hardware/tensorbook-<date>-raw.md` — gitignored, retained off-machine.
 
 Redacted: serial numbers, MAC addresses, filesystem UUIDs and hostname are deliberately absent.
@@ -42,11 +43,13 @@ identical, so the documented "1 TB NVMe + 1 TB M.2 SATA" Tensorbook variant, whi
 RAID0 actively harmful, does not apply to this unit. **The mixed-media striping concern is retired.**
 
 Calling this "the striping risk is retired" would be wrong, and an earlier draft of this file did.
-Every central RAID0 risk is still live:
+One of the risks below has since been closed by measurement. The rest are still live:
 
 - Either drive failing destroys the entire volume (D4/D15, accepted deliberately).
-- **SMART health is still unknown** — `smartmontools` was not installed at capture time, so nothing
-  here says whether these two drives are actually healthy enough to stripe.
+- ✅ **Drive health is no longer unknown.** `smartmontools` was installed for the 2026-09-01
+  follow-up and both drives returned **PASSED**, zero media errors, 100 % spare (see "Drive health"
+  below). That settles whether the pair is healthy enough to stripe *today*. It does not reduce the
+  exposure: RAID0 makes either drive's *future* failure fatal to the whole volume.
 - Off-machine backup remains load-bearing rather than a convenience.
 - The 4 KiB dm-crypt tuning that motivated the layout is **unmeasured on this hardware** and is
   subagent-reported testimony.
@@ -454,16 +457,25 @@ D19 chose Ubuntu 26.04 LTS substantially *because* it ships signed precompiled N
 work under Secure Boot. D29 makes hibernation a launch requirement. On a stock Ubuntu kernel, this
 capture indicates you cannot have both.
 
-**Confirm first — one command, no reboot:**
+**Confirmed 2026-09-01 — this is no longer a hypothesis.** The follow-up capture read the lockdown
+state directly:
 
-```bash
-cat /sys/kernel/security/lockdown     # expect: none [integrity] confidential
+```
+lockdown        : none [integrity] confidentiality
 ```
 
-If `integrity` is bracketed, lockdown is active and Secure Boot is the cause. The decisive test is
-then to disable Secure Boot in firmware and re-check `/sys/power/state` for `disk`.
+`[integrity]` is the active mode and `nohibernate` is unset, so Secure Boot → lockdown → hibernation
+is the measured cause rather than the suspected one. Re-confirmed unchanged by
+`scripts/verify-firmware.sh` on 2026-09-02.
 
-If confirmed, this is a §3.2 decision, and the branches are real:
+**The decisive test is available and reversible.** The firmware walk established that Secure Boot is
+togglable from `Security → Secure Boot`, and that this firmware exposes **no key-management menu at
+all** — so disabling it cannot clear the vendor keys, and re-enabling restores the current state. The
+test is therefore: disable Secure Boot, boot, read `/sys/power/state` for `disk`. §3.2 can be
+**measured rather than argued**, which is why it stays a decision due before M3 rather than a guess
+made now.
+
+This is a §3.2 decision, and the branches are real:
 
 - **Disable Secure Boot** → hibernation becomes available. Signed NVIDIA modules still load (they are
   simply no longer *required*), so D19's package choice keeps its practical benefit. Cost: the boot
@@ -483,5 +495,18 @@ Swap must be ≥ RAM for hibernation and cannot be comfortably resized later.
 - Size for a **possible 128 GB upgrade** (~136 GiB swap): loses ~7 %, and hibernation keeps working
   after a RAM upgrade rather than silently breaking.
 
-The second option costs about 64 GiB of disk to avoid a reinstall later. Worth deciding now, because
-it is baked in at install time.
+**DECIDED 2026-09-02 — D36: swap is sized at 136 GiB, for a possible 128 GB upgrade.**
+
+The reasoning, so it is not re-litigated: 64 GiB of extra swap is ~3.2 % of the 2 TB volume, and the
+alternative cost of being wrong is a reinstall, because swap cannot be comfortably resized after
+install. This machine's binding constraint is RAM — D28's shape is 5–10 API agents plus 1–2 local
+models on one box — two DIMM slots are free, and DDR4-3200 SODIMMs are cheap. The asymmetry favours
+the larger allocation.
+
+**This holds regardless of how §3.2 resolves.** If Secure Boot is kept and hibernation stays
+unavailable, the swap is oversized for a feature that does not work — which is precisely the
+"swap stays sized so the decision can be revisited without reinstalling" branch above. Sizing for
+hibernation now is what keeps §3.2 reversible later.
+
+This closes M0's last open exit criterion (overview §6, M0 exit: *"an explicit go/no-go recorded for
+each of ... RAM-derived swap sizing"*).

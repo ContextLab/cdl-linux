@@ -134,3 +134,21 @@ boltctl                           : present
 stored/known devices              : 0
 0
 ```
+
+> ⚠️ **The `0` above is wrong, and is retained only because it is what the script printed.**
+> The generating script had two bugs in this one field, both since fixed in
+> `scripts/verify-firmware.sh`:
+>
+> 1. The device regex matched the multibyte bullet glyph that prefixes each `boltctl list` entry.
+>    Inside a bracket expression that is locale-dependent, so it counted `0` against a populated
+>    list. The fix counts `uuid:`, which appears exactly once per device and is plain ASCII.
+> 2. `grep -c` prints `0` *and* exits non-zero on no matches, so the `|| echo 0` fallback appended
+>    a **second** zero — which is the stray `0` on its own line.
+>
+> **Corrected value, re-measured on the Tensorbook with the fixed command: `1`.** One device is
+> stored, which matches the dock enrolment recorded in `notes/hardware/firmware-gate-checklist.md`
+> item 8. The checklist's "1 stored device" is the figure to trust; this block is not.
+>
+> This matters beyond bookkeeping: `0` would have read as *the dock is unenrolled and boltd has no
+> record*, which — given that this firmware exposes no Thunderbolt policy to fall back on — is the
+> exact failure this check exists to detect.
