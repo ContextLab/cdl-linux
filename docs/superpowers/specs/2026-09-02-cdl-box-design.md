@@ -112,11 +112,28 @@ There is **no fan control on this machine**, in firmware or in the OS (0 fan inp
 writable PWM, measured). The only levers are `intel_pstate`'s `no_turbo` and
 `max_perf_pct`, both confirmed writable, plus refusing to start work.
 
-A `cdl-thermal` unit samples package and GPU temperature and steps `max_perf_pct` down
-when a threshold is crossed. This is a **best-effort comfort measure, not a safety
-mechanism**: the hardware throttles itself regardless, and this exists to make sustained
-inference less thermally punishing, and to spin the fans up less often, rather than to prevent
-damage.
+A `cdl-thermal` unit samples package and GPU temperature and steps `max_perf_pct` down when
+a threshold is crossed. This is a **best-effort comfort measure, not a safety mechanism**:
+the hardware throttles itself regardless, and this exists to make sustained inference less
+thermally punishing, and to spin the fans up less often, rather than to prevent damage.
+
+The parameters, so the unit is buildable rather than gestured at. All are configurable and
+these are the starting values:
+
+| Parameter | Value |
+|-|-|
+| Sample interval | 5 s |
+| Step down | Package ≥ 90 °C: `max_perf_pct` −10, floor 40 |
+| Step up | Package ≤ 75 °C **for 60 s continuously**: `max_perf_pct` +10, ceiling 100 |
+| Hysteresis | The 15 °C gap between those thresholds, plus the 60 s dwell, which is what stops it oscillating once a minute |
+| Recovery | On unit stop or failure, `max_perf_pct` is restored to 100. A dead thermal daemon must not leave the machine throttled silently |
+| `no_turbo` | Set only if stepping reaches the floor and the package is still ≥ 90 °C |
+
+**"Refusing to start work" applies to exactly one thing: `cdl-thermal` publishes a gate that
+the model-server wrapper reads before loading a new model.** It does not stop training runs,
+does not kill anything already running, and does not touch agent sessions. A person who
+starts a long job on a hot machine is making a choice, and this is not the component that
+overrules it.
 
 ## 3. Provisioning: a script, not an image
 
@@ -154,7 +171,10 @@ points anywhere but `api.anthropic.com`**, and `DISABLE_TELEMETRY`, `DO_NOT_TRAC
 outright. The obvious design (one local gateway, privacy variables on by default, set in
 `/etc/environment`) would therefore silently remove a capability you are paying for.
 
-So: keys live in a keystore at `~/.config/cdl/keys` (mode 0600), and a launcher exports
+So: keys live in a **permissions-protected credentials file** at `~/.config/cdl/keys`,
+mode 0600, owned by the user. It is **not** a keystore and is not encrypted at rest; anything
+that can read the user's files can read it, and the boundary is file permissions plus
+LUKS while the machine is off, which is less than the word keystore implies. A launcher exports
 only what that agent needs, only into that process. Nothing goes into a shell profile or
 `/etc/environment`. Both spellings of the divergent provider variables are set where a
 provider needs it (`TOGETHER_API_KEY` and `TOGETHERAI_API_KEY`; `FIREWORKS_API_KEY` and
@@ -168,43 +188,67 @@ enabled for the user.
 
 This is the deliberate simplification against the archived design, and it costs
 something: `zellij` holds scrollback in memory, so the record of a session dies with it.
-§8's dashboard partly compensates by recording what was started and when, and a per-session
-`script(1)` log is available for anything that needs to be kept.
+
+**Persistent session logging is therefore on by default**, not opt-in. Agent sessions launch
+under `script(1)`, appending to `~/.local/state/cdl/sessions/<name>-<date>.log` at mode 0600.
+Losing the only transcript of what an agent did, at the moment the session exits, is the
+kind of loss that is invisible until it matters and then cannot be repaired. Logs rotate by
+size and age on the same policy as §11.1, and `--no-log` opts out per session.
 
 ## 5. Local model serving
 
-### 5.1 One endpoint
+### 5.1 Ollama is the endpoint; llama-swap is a second, separate one
 
-Two servers, one stable address:
+Draft 1 said "two servers, one stable address" without saying what did the addressing.
+There is **no reverse proxy and no unified router**, because inventing one is work with no
+payoff at this scale. Instead:
 
-- **Ollama** for everyday use: a good catalogue, one-command pulls, and an OpenAI-compatible
-  API. This is the default.
-- **`llama.cpp`'s `llama-server` behind `llama-swap`** for cases Ollama does not cover.
-  `llama-server` uniquely serves OpenAI chat-completions, OpenAI Responses **and** Anthropic
-  Messages from one binary, which is what lets all four agent CLIs point at a local model.
-  Codex in particular accepts only `wire_api="responses"` for custom providers.
+| Service | Port | Bind | Role |
+|-|-|-|-|
+| **Ollama** | `11434` | tailnet + localhost | **The endpoint.** Everything points here by default, including other devices |
+| `llama-swap` → `llama-server` | `8081` | localhost only | The escape hatch, for models or APIs Ollama does not serve |
 
-Both are `systemd` units. Models live under `/srv/models` with a shared cache, so a model
-pulled once is not downloaded again by the other server.
+**Model selection is by server, not by a routing rule.** A client picks Ollama's port and
+names an Ollama model, or picks llama-swap's port and names one of its configured models.
+Nothing translates between them, and nothing guesses. That is a deliberately dull design:
+one address for the common case, a second address when you need the other thing.
 
-### 5.2 LM Studio is out
+**Guaranteed API: OpenAI chat-completions, on Ollama, at `11434`.** That is what other
+devices and every agent CLI can rely on. `llama-server` additionally serves OpenAI Responses
+and Anthropic Messages, which is why it exists at all, since Codex accepts only
+`wire_api="responses"` for custom providers. Those two are available on `8081` and are
+**not** promised on the main endpoint.
 
-**Decided 2026-09-02, on documentation rather than preference.** The desktop app's headless
-mode *"works on Mac, Windows, and Linux machines with a graphical user interface"*, so it
-cannot run on this box at all. Its server-native daemon (`llmster`, *"the core of the LM
-Studio desktop app, packaged to be server-native, without reliance on the GUI"*) does run
-headless, but it installs by `curl -fsSL https://lmstudio.ai/install.sh | bash` with no
-licence stated, so it cannot be part of a provisioned image.
+### 5.2 Model storage is not shared, and draft 1 was wrong to imply it
 
-The value LM Studio adds over Ollama is its catalogue and its GUI, and the GUI is exactly
-the part that does not come to a headless box. It is documented in the runbook as a
-one-line optional install for anyone who wants it, and nothing depends on it.
+Draft 1 claimed a model pulled once would not be downloaded again by the other server. That
+is **not true and should not have been asserted**. Ollama keeps content-addressed blobs
+under its own directory with manifests; `llama-server` wants a GGUF file path. They are not
+interchangeable without work.
 
-### 5.3 VRAM is the binding constraint
+Both trees live under `/srv/models` (`/srv/models/ollama`, `/srv/models/gguf`) so they share
+a **disk location**, which is all the sharing this spec claims. Whether a single copy can
+serve both is **spike S3** (§11): find whether an Ollama blob can be handed to
+`llama-server` directly, for the exact versions and quantisations in use. Until that spike
+passes, assume a model wanted by both servers is stored twice.
 
-16 GB, measured. That fits one large model or one large plus one small, which is what
-`llama-swap` exists to manage. A `flock` semaphore guards the GPU so a training run and a
-serving model do not both claim it and fail confusingly.
+### 5.3 VRAM, and what happens when training holds the GPU
+
+16 GB, measured. That fits one large model, or one large plus one small, which is what
+`llama-swap` exists to manage.
+
+**The GPU lock is a contract, and it only works if every entry point honours it** (§6.1).
+When a training run holds the lock:
+
+- `llama-swap` **refuses to load a new model** and returns an error naming the holder. It
+  does not queue, because a queued inference request that arrives an hour later is worse
+  than a refusal.
+- **An already-resident model keeps serving.** Eviction on lock acquisition would make
+  training silently break inference, and the person training is usually the person serving.
+- Ollama is started under the same wrapper and behaves the same way.
+
+This is cooperative, not enforced. Anything that runs `python train.py` directly, without
+the wrapper, will take VRAM and the lock will not stop it.
 
 ## 6. Training and fine-tuning
 
@@ -218,8 +262,27 @@ The stack, installed by `20-nvidia.sh` and `40-ml.sh`:
 - Jupyter available but bound to localhost, reached by SSH port-forward rather than exposed.
 
 16 GB of VRAM sets the realistic ceiling: LoRA and QLoRA fine-tunes of 7B-class models, not
-full fine-tunes of large ones. The spec says so plainly so that nobody plans around
-capacity the card does not have.
+full fine-tunes of large ones. The spec says so plainly so that nobody plans around capacity
+the card does not have.
+
+### 6.1 The GPU lock contract
+
+A `flock` only works if every entry point takes it, so the contract has to be written down
+rather than assumed:
+
+| Element | Value |
+|-|-|
+| Lock file | `/run/cdl/gpu.lock`, created by a `tmpfiles.d` rule, mode 0664, group `cdl` |
+| Who takes it | `cdl-gpu <command>`, a wrapper that acquires the lock and `exec`s. **Ollama, `llama-swap` and every training entry point start under it** |
+| Mode | Exclusive for training; shared for inference servers, so two servers can coexist while a training run excludes both |
+| Timeout | Training waits up to 30 s then fails with the holder named. Inference does not wait at all: it refuses immediately (§5.3) |
+| Holder identity | The wrapper writes pid, command and start time into the lock file, so a refusal can say what is holding it rather than only that something is |
+| Release | `flock` releases on process exit, including a crash, so a killed job cannot strand the GPU |
+
+**This is cooperative and the spec does not pretend otherwise.** A bare `python train.py`
+takes VRAM and honours nothing. The wrapper is made the path of least resistance (it is what
+the shell aliases and the systemd units call), which is the only enforcement available
+without a container or cgroup device policy, and neither earns its cost here.
 
 ## 7. Remote access
 
@@ -231,8 +294,26 @@ capacity the card does not have.
 - **The model endpoint is served on the tailnet**, so other devices use this machine's GPU
   by pointing at one URL. It binds to the tailnet interface, never `0.0.0.0`.
 
-There is no remote LUKS unlock (§2.1). An unattended reboot parks at the passphrase prompt
-and needs someone at the keyboard, which is accepted deliberately.
+### 7.1 A reboot takes the machine offline until someone visits it
+
+There is no remote LUKS unlock (§2.1), and with the machine in an office rather than at
+hand, that is the sharpest trade in this design. **A reboot from any cause parks at the
+passphrase prompt and the machine stays unreachable until a person types it.** Causes
+include a power cut, an automatic kernel update, and `reboot` typed over SSH by someone who
+forgot.
+
+The operator has to be able to tell that state apart from a machine that has crashed, so:
+
+- **Reboots are never automatic.** `/var/run/reboot-required` is reported on the dashboard
+  and by a login notice; nothing acts on it (§11.2).
+- **`cdl reboot` warns before it does anything**, naming the consequence, and requires
+  confirmation. A plain `reboot` still works, because making it not work would be worse.
+- **The expected offline state is documented behaviour, not an incident.** Tailscale shows
+  the node offline and the dashboard is unreachable, which looks identical to a hardware
+  fault from outside. Anyone diagnosing it should check the reboot notice first.
+- A UPS would convert the commonest cause (a brief power cut) from a trip to the office
+  into nothing at all. Out of scope here, noted because it is the
+  cheapest fix for the biggest annoyance this decision creates.
 
 ## 8. The web dashboard
 
@@ -249,16 +330,21 @@ It exists so that the state of the machine is glanceable from a phone.
 | **GPU** | VRAM used and free, utilisation, temperature, and which model is resident |
 | **Model servers** | Ollama and `llama-swap` up or down, loaded model, requests served |
 | **Sessions** | `zellij` sessions, when each was started, and which agent CLI is running in it |
-| **Machine** | CPU temperature, `max_perf_pct` (so throttling is visible rather than mysterious), load, memory, disk free on both mounts |
-| **Storage** | Volume usage, largest models, last backup time and result, and **SMART status for both drives** (§2.1: on a striped pair this is the only early warning) |
+| **Machine** | CPU temperature, `max_perf_pct` (so throttling is visible rather than mysterious), load, memory |
+| **Storage** | **One figure for free space, not one per subvolume.** `@`, `@home` and `@models` share a single btrfs allocation pool, so per-subvolume `df` output implies an isolation that does not exist and would read as three separate budgets. Also: largest models, last backup time and result, and **SMART status for both drives** (§2.1: on a striped pair this is the only early warning) |
 
-### 8.2 What it can do
+### 8.2 What it can do: nothing, in v1
 
-Deliberately little, because every action is a way to break something from a phone:
+**The dashboard is read-only.** Draft 1 offered two actions and justified them as
+"idempotent and reversible from the terminal", which was wrong about one of them: stopping a
+`zellij` session can destroy unsaved work in an editor or an agent mid-task, and no amount
+of terminal access undoes that. A control that can lose work does not belong behind a phone
+screen in v1.
 
-- Load or unload a model.
-- Stop a `zellij` session.
-- Nothing else. No shell, no file access, no editing.
+Controls get added later, one at a time, when terminal use has shown which are actually
+wanted. Whichever come first must define graceful-versus-forced behaviour explicitly and
+require a deliberate confirmation. Model load and unload is the likely first candidate,
+because it genuinely cannot lose anything.
 
 ### 8.3 How it is built and secured
 
@@ -293,109 +379,155 @@ Theming for the shell side is configured on the box, and the client terminal's o
 
 ## 10. Backup
 
-**`restic` over SFTP** to the NAS, on a timer, with `--exclude-caches` and `CACHEDIR.TAG`
-honoured. `restic -r sftp:user@nas:/path` needs only `sshd` on the far end and no software
-installed there, which is what makes it the right transport here.
+There is no NAS. The machine goes in an office, and the striped array has no redundancy, so
+this section is the only thing standing between a drive failure and total loss.
 
-### 10.1 The NAS runs no containers, so append-only has to come from the storage layer
+### 10.1 Destination: a Hugging Face Storage Bucket
 
-**Decided 2026-09-02.** The archived design's primary choice was `restic` talking to
-`rest-server --append-only` in a container on the NAS, which closed threat T5 (a stolen
-backup credential) on the strength of rest-server's own guarantee: it *"allows creation of
-new backups but prevents deletion and modification of existing backups"*. The NAS does not
-run containers, so that option is gone and **T5 is not closed by the backup transport any
-more**.
+**Decided 2026-09-02, on documentation.** HF Storage Buckets are S3-compatible object
+storage on the Xet backend, reached through a gateway at `https://s3.hf.co/<namespace>`, and
+the Hub's own documentation states this use case: *"Buckets are well-suited for maintaining
+rolling backups."* Unlike a Git-backed dataset repo, buckets are not versioned, so deleting
+old data actually reclaims it rather than accumulating history.
 
-This is a genuine loss and the spec says so rather than substituting a weaker claim. Over
-SFTP the laptop's key has full write access to the repository path. Anyone who takes the
-machine can run `restic forget --prune`, or simply delete the files, and the history goes
-with it. Encryption does not help: the repository password is on the laptop by necessity.
+`restic` speaks S3, so the repository is `s3:https://s3.hf.co/<namespace>/<bucket>`.
+Credentials come from an HF access token via **Generate S3 credentials**, producing an
+`HFAK…` key ID and a secret shown once. The client settings the gateway requires:
 
-**The substitute is NAS-side snapshots**, which give the same property from underneath
-instead of from the protocol. A scheduled snapshot of the backup dataset cannot be deleted
-by a client that has no administrative access to the NAS, so a wiped repository is
-recoverable from the most recent snapshot. Conceptually, the storage layer becomes the
-append-only layer.
+| Setting | Value | Why |
+|-|-|-|
+| `region` | `us-east-1` | Required; the gateway is single-region |
+| addressing style | `path` | Buckets are path segments, not subdomains |
+| list version | **`ListObjectsV2` only** | *"`ListObjectsV1` is not supported"* |
+| checksum calculation / validation | `when_required` | Recent clients send trailing CRC32 framing the gateway does not parse |
 
-### 10.2 The NAS is a QNAP, and QNAP snapshots have a hard prerequisite
+**Capacity is not a constraint here.** The account is on the free tier (100 GB private), and
+`contextlab` carries an Academia plan with substantially more. `/srv/models` is excluded
+(§10.3), so the repository holds `/home` and `/etc`, which is tens of gigabytes.
 
-**Checked against QNAP's documentation on 2026-09-02, because the answer decides whether
-§10.1's substitute exists at all.**
+### 10.2 What this destination does not give us, stated plainly
 
-> *"Only thick volumes, thin volumes and block-based LUNs created in a storage pool support
-> snapshots."* Static volumes, created directly on RAID groups, do not.
+**It gives no protection against deletion, and that is worse than the QNAP plan it
+replaces.** The Hub's own words: *"Since buckets are non-versioned, deletions are immediate
+and permanent — there is no way to recover a deleted file."* The S3 gateway confirms it from
+the other direction: *"object versioning, lifecycle rules"* are among the *"unsupported
+features"*.
 
-**This is the one thing to check before B7, and it is binary.** If the share the backup
-repository sits on is a **static volume**, QNAP cannot snapshot it, no configuration will
-change that, and threat T5 is open rather than mitigated. Moving a static volume to a
-storage pool is a rebuild of that volume, not a setting, so finding out late is expensive.
+So **threat T5 is open**. Anyone who takes the machine, or any process that runs as the user,
+holds a write-capable token and can erase the backup history in one command. The
+repository password does not help, since it sits on the box by necessity.
 
-The other documented conditions, in decreasing order of how likely they are to bite:
+**The mitigation is a second copy the box cannot reach**, and it is required rather than
+advisory given RAID0:
 
-| Condition | Detail |
+- A separate trusted machine (a laptop, not this box) periodically pulls the bucket with
+  `rclone copy` (never `sync`, which propagates deletions) to local storage.
+- That machine holds its own token. **The box's token is never present on it**, and the box
+  has no credential for the second copy.
+- The pull runs on a schedule long enough to notice a wipe before it propagates, which is
+  the reason for `copy` over `sync`: it never deletes at the destination, so a bucket erased on Monday is
+  still present in the second copy on Tuesday.
+
+Fine-grained HF tokens can be scoped to a single bucket, which limits blast radius without
+preventing deletion inside that scope. Use one; it is free and it bounds the damage.
+
+### 10.3 What is backed up
+
+- `/home` and `/etc`, with `--exclude-caches` so `CACHEDIR.TAG` directories drop out. The
+  Hugging Face cache writes that tag, so the model cache is excluded for free.
+- **`/srv/models` is not backed up.** Weights are re-downloadable and large. Checkpoints and
+  datasets that are *not* re-downloadable live in `/srv/models/keep`, which **is** backed up.
+- Restore drills are in B0 and B7 (§11), not deferred. A backup nobody has restored from is
+  a hypothesis.
+
+### 10.4 One spike before this is relied on
+
+**Does `restic` work against the HF S3 gateway?** The gateway supports only
+`ListObjectsV2`, does not store `x-amz-meta-*`, restricts object key shapes, and redirects
+`GetObject` to a CDN edge for clients it does not recognise. `restic` uses `minio-go`, which
+none of that obviously breaks, but none of it is confirmed either. The spike is small: create
+a bucket, `restic init`, back up a directory, `restic check --read-data`, restore, and diff.
+Until that passes, the backup destination is a plan rather than a mechanism.
+
+## 11. Updates, logs and maintenance
+
+Draft 1 had no update policy at all, which for an always-on machine is a gap rather than an
+omission.
+
+### 11.1 Log retention
+
+Session logs (§4.2), the dashboard's own log and any service logs outside the journal rotate
+at **64 MiB or 30 days, whichever comes first**, keeping five prior segments. `journald` is
+capped with `SystemMaxUse=2G`. A machine that runs for a year without anyone looking at it
+should not fill its root subvolume with text.
+
+### 11.2 OS and driver updates
+
+| Class | Policy |
 |-|-|
-| Volume type | Thick or thin, in a storage pool. **Static volumes are excluded.** |
-| Free pool space | Snapshots are *"stored outside of volumes and LUNs, in free storage pool space"*, so the pool needs headroom or snapshots stop being taken |
-| Snapshot count | *"depends on the NAS model and how much memory is installed"* |
-| RAM | 1 GB minimum; below that QNAP disables snapshots entirely. Any NAS worth backing up to will clear this |
+| Security updates | `unattended-upgrades`, security pocket only, applied automatically |
+| Everything else | Manual, by running the provisioning script, which is where version pins live |
+| **NVIDIA driver and CUDA** | **Pinned, and never in the unattended set.** A driver that updates under an in-flight training run, or that ships a kernel module mismatched to a running kernel, breaks the GPU quietly. Updated deliberately, followed by B2's acceptance test |
+| Kernel | Automatic within the HWE series, and it is the main reason a reboot gets scheduled |
+| Reboot required | `/var/run/reboot-required` is surfaced **on the dashboard**, never acted on automatically. §2.1's passphrase means an automatic reboot would take the machine offline until someone visits it |
 
-**The QNAP must not be reachable from the internet, and that is now a requirement of this
-design rather than general hygiene.** Once snapshots are the only thing protecting the
-backup, a compromise of the NAS takes the backup and its protection together. QNAP's own
-advisories describe ransomware campaigns (DeadBolt, Checkmate) that *"targeted all NAS
-exposed to the Internet without any protection"*, and QNAP's remediation advice is to
-disable port forwarding for the NAS management ports on the router and to turn off UPnP
-port forwarding. Reach it over the tailnet or the LAN, never a forwarded port.
+### 11.3 Pinned CLI refresh
 
-### 10.3 Two conditions on the laptop side
+The four agent CLIs are pinned (§4). They are refreshed **deliberately, together, and
+followed by B4's acceptance test**, because a silent auto-update to an agent CLI changes
+behaviour mid-task. A monthly check that reports what is behind, without applying it, is
+enough.
 
-Neither is assumed, and both are checked as part of B7:
+### 11.4 Rollback
 
-- The NAS must actually be snapshotting the volume that holds the repository, on a schedule,
-  with a retention window longer than the gap between backup checks. A snapshot feature that
-  is available but not enabled protects nothing.
-- The laptop's SSH credential must not be able to reach the snapshots. In practice this
-  means a dedicated unprivileged user, chrooted to the repository path via
-  `ForceCommand internal-sftp`, and no NAS administrative access from that account.
+btrfs snapshots of `@` are taken before the provisioning script runs and before a manual
+apt upgrade, retained for 30 days. Rolling back is a boot-time subvolume swap. **This is not
+a substitute for backup** (§10): the snapshots live on the same striped array that a drive
+failure destroys.
 
-**Retention pruning now runs from the laptop**, because there is no NAS-side component to
-run it. That is the direct consequence of the same change: the machine being backed up is
-also the machine that deletes old snapshots, which is exactly the arrangement rest-server
-existed to avoid.
+## 12. Build order
 
-- `/home` and `/etc` are backed up.
-- **`/srv/models` is not**, by default. Model weights are large and re-downloadable, and
-  backing up 200 GB of files that a `pull` command restores is a poor trade. Checkpoints
-  and datasets that are *not* re-downloadable live in `/srv/models/keep`, which **is**
-  backed up.
-- A restore drill is part of the acceptance criteria, not a later exercise. A backup nobody
-  has restored from is a hypothesis.
-- **The snapshot path is drilled too**, once: delete something from the repository
-  deliberately, then recover it from a NAS snapshot. That is the only way to find out
-  whether §10.1's substitute works before it is needed.
+Each milestone has an exit test, not a judgement, except where a judgement is the point and
+is labelled as one. **Two spikes and one preflight come before anything destructive.**
 
-## 11. Build order
+### The preflight, which must finish before either NVMe is touched
 
-Each milestone has an exit test, not a judgement.
+| # | Item | Exit test |
+|-|-|-|
+| **S1** | **Does `restic` work against the HF S3 gateway?** (§10.4) | Create a bucket, `restic init`, back up a directory, `restic check --read-data`, restore to scratch, `diff -r` clean. If it fails, the backup destination is unresolved and B0 cannot complete |
+| **B0** | **Back up the machine that exists today, and prove the backup is real** | The Tensorbook currently holds work. Before repartitioning: back up `/home` and `/etc` to the bucket, restore to scratch storage on a *different* machine, and diff. Then set up the §10.2 second copy and confirm it pulls. **Record explicitly that T5 is open** (a write-capable token on the box can erase the bucket) and that RAID0 is being accepted on those terms |
+| **S2** | **Rehearse the storage install in a disposable VM** | Two full installs from a written runbook, the second reproducing the first exactly. The runbook records partitioning and EFI layout, `mdadm` assembly during early boot, LUKS creation and unlock, btrfs subvolume creation and mount options, `/etc/crypttab`, `/etc/fstab`, initramfs contents, and behaviour when one array member is absent |
+
+**S2 exists because the provisioning script starts after installation**, so the most
+consequential part of the machine, the storage layout, is currently reproduced by nothing.
+A runbook that has been executed twice is the artifact; prose describing the layout is not.
+
+### The machine
 
 | # | Milestone | Exit test |
 |-|-|-|
-| **B1** | Base install, headless, SSH, Tailscale | Reboot; reachable over the tailnet by name without touching the machine, and `wakeup` shows XHCI disabled |
-| **B2** | NVIDIA, CUDA, PyTorch | `nvidia-smi` reports the 3080, and `torch.cuda.is_available()` returns true after a reboot |
-| **B3** | Model serving | A model answers on the endpoint from **another device** on the tailnet |
-| **B4** | Agent CLIs | All four launch, authenticate, and run a trivial task; Claude Code's phone steering still works, which is what §4.1 protects |
-| **B5** | Terminal environment | A day of real work in it, which is a judgement and is marked as one |
-| **B6** | Dashboard | The panels in §8.1 are correct against the machine's real state, checked from a phone |
-| **B7** | Backup | Restore `/home` to a scratch directory and diff it |
-| **B8** | Provisioning is reproducible | The script runs clean on a fresh VM, then runs again and changes nothing |
+| **B1** | Base install, headless, SSH, Tailscale, power policy | Reboot, **enter the LUKS passphrase at the machine**, and after boot completes it becomes reachable over the tailnet by name with no further intervention. `/proc/acpi/wakeup` shows XHCI disabled and `systemd-sleep` masked |
+| **B1a** | Network exposure is what the spec says | From off-tailnet: SSH refused, dashboard refused, model port refused. From on-tailnet: SSH accepted, dashboard accepted. `mosh`'s UDP range reachable on the tailnet only. Jupyter bound to localhost and **not** reachable from another device even on the tailnet |
+| **B2** | NVIDIA, CUDA, PyTorch | `nvidia-smi` reports the 3080 and `torch.cuda.is_available()` returns true, both **after a reboot**, not only after install |
+| **B3** | Live with it | Several days of real work over SSH. This is a judgement, and it is the one that decides whether any of the rest is worth building |
+| **B4** | Ollama | A model answers on `11434` from **another device** on the tailnet. Measure and record actual VRAM use, load time, tokens/sec and package temperature under sustained load, because §2.3's thresholds are guesses until then |
+| **S3** | **Can one stored copy serve both servers?** (§5.2) | Hand an Ollama blob to `llama-server` for the exact quantisation in use. Pass means one copy; fail means storage is doubled and the spec says so |
+| **B5** | `llama-swap`, and the GPU lock | Codex talks to `llama-server` over Responses on `8081`. A training run holding the lock makes a new model load **refuse with the holder named**, while an already-resident model keeps serving |
+| **B6** | Agent CLIs, `zellij`, session logging | All four launch, authenticate and run a trivial task. Claude Code's phone steering still works, which is what §4.1 protects. Kill a session and confirm its `script(1)` log survives with the transcript intact |
+| **B7** | Backup, on the new machine | Restore `/home` to a scratch directory and diff it. Confirm the second copy (§10.2) is still pulling |
+| **B8** | Read-only dashboard | Panels in §8.1 match the machine's real state, checked from a phone. No write actions exist |
+| **B9** | Provisioning reproduces the machine | The script runs clean on a fresh VM, then runs again and changes nothing. Together with S2's runbook, this is the whole reproducibility claim |
 
-**B1 to B4 is the machine you can actually work on.** Everything after that improves it.
+**B1 through B3 is the decision point.** If the machine is not pleasant to work on over SSH,
+that needs finding out before the model-serving and agent layers get built on top of it.
 
-## 12. Open questions
+## 13. Open questions
 
 | # | Question | Why it is open |
 |-|-|-|
-| 1 | Which GPU drives the dock's external display | Deferred from M0, and it only matters if a monitor is ever attached to this box. On a headless server it may never need answering. |
-| 2 | Whether `croft` and the Emacs LLM integration are still wanted | Both came from the original requirements list, which predates the headless decision. |
-| 3 | **Is the QNAP share on a thick or thin volume in a storage pool, rather than a static volume?** | The NAS runs no containers, so transport is SFTP and T5's mitigation moved to NAS snapshots (§10.1). QNAP supports snapshots only on thick or thin volumes in a storage pool (§10.2), so this single fact decides whether the substitute exists. If it is a static volume, **record T5 as open** rather than describing the backup as protected, and treat converting the volume as a separate piece of work. Check before B7. |
-| 4 | Whether `zellij` scrollback loss is tolerable in practice | If it is not, the answer is per-session `script(1)` logging rather than the archived supervisor design. |
+| 1 | Does `restic` work against the HF S3 gateway? | **S1 in §12, and it blocks B0.** The gateway supports only `ListObjectsV2`, drops `x-amz-meta-*`, restricts key shapes and redirects `GetObject` to a CDN. None of that obviously breaks `minio-go`, and none of it is confirmed |
+| 2 | Which machine holds the second backup copy, and how often does it pull? | §10.2 makes a second copy a requirement rather than advice, because the HF bucket has no versioning and no lifecycle rules. The schedule sets how long a wipe can go unnoticed |
+| 3 | Can one stored copy serve both Ollama and `llama-server`? | **S3 in §12.** Decides whether `/srv/models` holds one copy of a model or two |
+| 4 | Are `croft` and the Emacs LLM integration still wanted? | Both came from the original requirements list, which predates the headless decision |
+| 5 | Is a UPS worth buying? | §7.1: it converts the commonest cause of an unattended reboot from an office trip into nothing. Cheap, and outside this spec |
+| 6 | Which GPU drives an external display, if one is ever attached | Deferred from M0. On a headless server it may never need answering |
