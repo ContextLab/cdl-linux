@@ -18,17 +18,28 @@ The same plugin **already ships the right tool** and its SKILL.md never points a
 is a dispatch template for a cold reviewer subagent. Use it. Do not edit the plugin cache — it
 is overwritten on update.
 
-**Two mechanical checks, on every spec revision.** Both found real defects on the lifecycle
-spec and both are cheap:
+**Run `scripts/check-spec.py <spec>` on every spec revision.** It does three checks, each of
+which has caught a real defect that re-reading missed: internal `§N.M` references resolve; every
+SQL identifier named in prose exists in the schema; and the DDL actually executes in SQLite. A
+bare `§N` means *this* document, `overview §N` means the frozen overview — the two documents both
+number from 1.
 
-1. **Every internal `§N.M` reference resolves to a real heading in that document.** This repo
-   has two documents that both number sections from 1, so a bare `§7` is ambiguous: the
-   convention is that bare `§N` means *this* document and `overview §N` means the frozen
-   overview.
-2. **Every schema identifier named in prose exists in the schema, and vice versa.** Draft 1
-   advertised artifacts, egress allowlists, queued reasons, remote fields and probe timestamps
-   in prose and in the CLI surface while the `CREATE TABLE` block had none of them. This is the
-   single largest defect class found, and no amount of re-reading catches it.
+**Know what it cannot catch.** Three blind spots, all of which produced real bugs:
+
+- **A reference can resolve and still be wrong.** After renumbering, nine `§19.x` references
+  pointed at the wrong sections and every one of them "resolved". The script prints a
+  reference-to-title table for exactly this; read it.
+- **Executing is not testing.** The DDL ran cleanly while `cdl worktree rm`'s deletion sequence
+  was impossible — plain `REFERENCES` meant a `FOREIGN KEY constraint failed` on every worktree
+  that had ever run a unit. **Run the operations the prose describes**, in `sqlite3`, against a
+  scratch database. The bug was found that way and would not have been found any other way.
+- **The prose/schema check is one-directional and shallow.** It matches backticked snake_case,
+  so a behaviour promised in plain words with no column behind it passes silently.
+
+**Then dispatch cold reviewers before calling a spec done** — plural, and genuinely cold: a fresh
+agent given the file and no conversation context. Reviewing inside the working conversation is not
+an independent check, and every round so far has proved it: three review rounds found 10, 13 and 16
+defects respectively, including two that would have destroyed live work.
 
 ## Evidence files
 

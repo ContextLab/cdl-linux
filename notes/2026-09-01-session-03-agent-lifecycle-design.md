@@ -208,3 +208,51 @@ Two further self-caught defects, from writing the fixes rather than from the rev
   services but deletes nothing: a wrongly-removed worktree costs uncommitted work, a stale row
   costs a little confusion.
 - The single unreproduced `test-capture-safety.sh` failure. Not root-caused; not claimed fixed.
+
+---
+
+## Draft 4 (2026-09-02) — first COLD review round
+
+Draft 3 was reviewed by **two cold agents** (fresh, file only, no conversation context), per the
+draft-2 reviewer's point that reviewing inside the working conversation is not independent. Both
+ran the DDL in real SQLite. That is how the blocker was found, and it would not have been found
+by reading.
+
+**The blocker: `cdl worktree rm` could never have run.** `unit.worktree_id` and
+`unit.port_block_id` were plain `REFERENCES`, so with `PRAGMA foreign_keys = ON` both `DELETE`s
+fail — `FOREIGN KEY constraint failed` — for any worktree that ever ran a unit, i.e. every one.
+Fixed with `ON DELETE SET NULL` on both, verified end to end: the sequence succeeds, the unit row
+survives with its references nulled, and branch, path and `base_port` all become reusable.
+
+**Two of my own draft-3 fixes were themselves buggy**, which is now a pattern worth naming:
+
+- The reconciliation scope fix ran the ladders over "each non-`terminal` row", which includes
+  `queued`. A queued row has no `boot_id`, no service and no pid, so `L1`–`L3` would conclude
+  **dead** — the login reconcile would have emptied the queue on every boot.
+- The launch-handoff fix (§4.5) had a deadline race: reading and writing are not the same instant,
+  so a reconciler could decide `launch_failed` and commit it after the supervisor acknowledged and
+  `exec`'d. Live agent, terminal row, freed lease. Both writes are now compare-and-swap.
+
+Also corrected: `§3.4` claimed the write pattern was "conflict-free" — **measured false**, WAL
+permits one writer database-wide and a second gets `database is locked` on a *different* row after
+the 5 s timeout. Single-owner-per-row is about correctness, not contention.
+
+### Tooling added
+
+`scripts/check-spec.py` — three checks (references resolve, prose identifiers exist in the schema,
+DDL executes) plus a reference-to-title report. **Its three blind spots are documented in
+`CLAUDE.md`, because each produced a real bug:** a reference can resolve and still point at the
+wrong section (nine did, after a renumber); executing the DDL is not the same as running the
+operations the prose describes (which is how the blocker hid); and the prose check only matches
+backticked snake_case, so a promise made in plain words passes silently.
+
+### Review rounds so far
+
+| Round | Reviewer | Findings |
+|-|-|-|
+| 1 | in-conversation | 10 |
+| 2 | in-conversation | 13 |
+| 3 | **two cold agents** | 16, one blocking |
+
+The trend is the argument for cold review: the count went **up** when the reviewer stopped sharing
+my context.
