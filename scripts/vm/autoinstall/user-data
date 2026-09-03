@@ -162,9 +162,19 @@ autoinstall:
         mount "$(echo "$dev" | sed 's/^UUID=/\/dev\/disk\/by-uuid\//')" "/target${mnt}"
       done
 
-    # Rebuild the bootloader against the new layout.
-    - curtin in-target -- update-grub
-    - curtin in-target -- update-initramfs -u -k all
+      # Rebuild the bootloader against the new layout, in an explicitly constructed chroot.
+      # `curtin in-target` cannot be used here: /target was unmounted and remounted by hand
+      # above, so curtin's own record of what is mounted is stale and its chroot setup fails
+      # with exit 2. Doing the bind mounts here keeps the knowledge in one place.
+      for v in proc sys dev dev/pts run; do
+        mkdir -p "/target/$v"
+        mount --rbind "/$v" "/target/$v" || mount --bind "/$v" "/target/$v"
+      done
+      chroot /target update-grub
+      chroot /target update-initramfs -u -k all
+      for v in run dev/pts dev sys proc; do
+        umount -R "/target/$v" || true
+      done
 
     # Serial console on the installed system, so a reboot can be driven and observed
     # without a display. Matches the headless design.
