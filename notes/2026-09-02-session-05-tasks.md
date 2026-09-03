@@ -125,6 +125,22 @@ Source: `notes/reviews/2026-09-02-cdl-box-deep-audit.md`
   still listed open after being answered; §8.3 described write actions after §8.2 declared
   the dashboard read-only; CLI refresh pointed at B4 when acceptance is B6; stale NAS prose.
 
+## Open: an intermittent suite failure, second occurrence
+
+`tests/run-all.sh` reported `failures: 1` once on 2026-09-03, immediately after rendering the
+whitepaper PDF and while the VM was running. **Not reproduced**: 25 consecutive runs of
+`tests/test-capture-safety.sh` and 8 consecutive full-suite runs were clean, and qemu was
+still running during those, so CPU contention is not obviously the cause either.
+
+This is the **second** occurrence in this project; the first was recorded in session 03 and
+also did not reproduce. Recording it rather than explaining it: no cause has been established,
+the failing check was not captured because only the summary line was kept, and the honest
+statement is that the suite has failed twice out of many hundreds of runs for reasons unknown.
+
+**The concrete fix available now is to stop losing the evidence.** `run-all.sh` prints which
+check failed but the calling command piped it to `tail -3`. Next occurrence should capture
+the full output.
+
 ## Decisions taken this session
 
 | # | Decision |
