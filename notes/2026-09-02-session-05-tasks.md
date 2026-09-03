@@ -32,6 +32,14 @@ Status key: `[ ]` not started · `[~]` in progress · `[x]` done · `[!]` blocke
   - **Recorded in the spec as §2.1.2** with four options and none chosen, because the
     measurement is not finished. This is the spike doing its job: the layout cannot be
     assumed, and draft 2 wrote it down as though declaring it made it so.
+  - Attempt 4 (curtin-built stack): **installed with 0 errors**, but then **looped 46 times**
+    -- `install.sh` boots the ISO kernel with `-kernel`, so every reboot re-enters the
+    installer. Booting those disks dropped to the **EFI shell** with no boot entry, which is
+    not worth diagnosing on a filesystem built by 46 overlapping passes.
+  - Two harness fixes: `shutdown: poweroff` in the autoinstall ends the run instead of
+    rebooting, and the EFI vars file is recreated fresh.
+  - Attempt 5 (clean): 0 errors, POWEROFF fired, disks 4.1G/3.9G. **Booting now, and the
+    installed kernel is starting**, so the EFI problem is resolved.
 - [ ] **V2. Boot it and answer the LUKS prompt.** `scripts/vm/boot.py`. Tests the unlock
   path the real machine will use.
 - [ ] **V3. Run the verifier.** `scripts/vm/verify.sh`. It now asserts `@`, `@home`,
@@ -82,6 +90,13 @@ Source: `notes/reviews/2026-09-02-cdl-box-deep-audit.md`
   disabling Secure Boot or enrolling our own key. Every branded stage keeps an unbranded
   escape (GRUB recovery entry, Plymouth Escape, tty2 plain getty), because branding that
   removes a diagnostic is a cost paid at the worst moment.
+- [x] **Fonts, palette, logo** (user request, 2026-09-03). Turned out to be D3/T1 from the
+  original brainstorming, dropped silently by the console-first decision. §9.6 restores it
+  with `kmscon` (in the Ubuntu archive; freetype/pango so it can shape, which the kernel VT
+  cannot); tty2 stays a kernel VT so recovery does not depend on it. §9.7 defines one palette
+  in one file feeding kmscon, `setvtrgb`, shell/tool themes and the dashboard CSS, with
+  contrast checked in the suite. Logo centred in Plymouth. Font is `fonts-firacode` plus
+  Symbols Nerd Font fallback, since the patched Nerd build is not packaged.
 - [ ] **A13. Regenerate the whitepaper + PDF** from the corrected spec. Its central argument
   (headless, not a distribution, SSH-primary) is now partly obsolete.
 
