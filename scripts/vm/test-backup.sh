@@ -28,18 +28,13 @@ K="$(prof_get aws_access_key_id)"
 V="$(prof_get aws_secret_access_key)"
 [[ -n "$K" && -n "$V" ]] || die "no [hf] profile in ~/.aws/credentials; generate S3 credentials first"
 
+[[ -f "$VM_KEY" ]] || die "no harness key at $VM_KEY; run scripts/vm/install.sh first"
 SSH_OPTS=(-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
-          -o LogLevel=ERROR -p "$SSH_PORT")
+          -o LogLevel=ERROR -o IdentitiesOnly=yes -i "$VM_KEY" -p "$SSH_PORT")
 
 # Commands are assembled as strings and evaluated in the guest, which is the point.
 # shellcheck disable=SC2029
-sshv() {
-    if command -v sshpass >/dev/null; then
-        sshpass -p "$VM_PASSWORD" ssh "${SSH_OPTS[@]}" "${VM_USER}@127.0.0.1" "$@"
-    else
-        ssh "${SSH_OPTS[@]}" "${VM_USER}@127.0.0.1" "$@"
-    fi
-}
+sshv() { ssh "${SSH_OPTS[@]}" "${VM_USER}@127.0.0.1" "$@"; }
 
 log "checking the VM is reachable"
 sshv true 2>/dev/null || die "cannot reach the VM on port $SSH_PORT; boot it first"

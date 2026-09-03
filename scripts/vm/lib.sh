@@ -31,7 +31,8 @@ SSH_PORT="2222"
 # Test-only. The real machine's passphrase is typed by a human and lives nowhere.
 LUKS_PASSPHRASE="cdl-vm-test-passphrase"
 VM_USER="cdl"
-VM_PASSWORD="cdl-vm-test"
+VM_PASSWORD="cdl-vm-test"          # console/sudo only; SSH is key-only (§7)
+VM_KEY="${VM_WORK}/id_cdlvm"       # generated per checkout, never committed
 
 case "$(uname -m)" in
     arm64|aarch64) QEMU="qemu-system-aarch64"; QEMU_MACHINE="virt,accel=hvf,gic-version=3"; QEMU_CPU="host" ;;

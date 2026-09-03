@@ -28,10 +28,22 @@ actual="$(shasum -a 256 "$ISO" | awk '{print $1}')"
 # Subiquity reads its autoinstall config from a volume labelled cidata. The label is what
 # cloud-init looks for, so it is not cosmetic.
 
+# The harness authenticates with a key, not a password: it is what §7 of the spec requires,
+# and an earlier version of this harness enabled SSH password auth for the guest, which the
+# audit flagged. The key is generated per checkout and never committed.
+if [[ ! -f "$VM_KEY" ]]; then
+    log "generating a harness ssh key"
+    ssh-keygen -t ed25519 -N '' -C 'cdl-vm-harness' -f "$VM_KEY" >/dev/null || die "ssh-keygen failed"
+fi
+
 log "building the cloud-init seed"
 seed_dir="$VM_WORK/seed"
 rm -rf "$seed_dir" && mkdir -p "$seed_dir"
-cp "$HERE/autoinstall/user-data" "$seed_dir/user-data"
+# Substitute this checkout's public key into the seed. The committed file carries a
+# placeholder so that a clone does not inherit somebody else's key.
+pubkey="$(cat "${VM_KEY}.pub")"
+sed "s|@@CDL_VM_PUBKEY@@|${pubkey}|" "$HERE/autoinstall/user-data" > "$seed_dir/user-data"
+grep -q '@@CDL_VM_PUBKEY@@' "$seed_dir/user-data" && die "public key substitution failed"
 printf 'instance-id: cdl-box-vm\nlocal-hostname: cdl-box-vm\n' > "$seed_dir/meta-data"
 rm -f "$VM_WORK/seed.iso"
 hdiutil makehybrid -quiet -iso -joliet -default-volume-name CIDATA \

@@ -32,54 +32,19 @@ autoinstall:
   identity:
     hostname: cdl-box-vm
     username: cdl
-    # mkpasswd -m sha-512 'cdl-vm-test' -- test-only credential, never leaves the VM
-    password: "$6$rounds=4096$cdlvmtest$1YJHtNQ0hZbdQPBvJ0nCLRoxhY8dMvHOaU8Xw5hLXHUoHYWRlxLZ0zZs.RQ8bYCLIf1XyH2NxvxLxJm2n2xEc/"
+    # Generated with `openssl passwd -6`, not written by hand. An earlier version of this
+    # file carried a hash with a comment claiming it was the hash of this password; it was
+    # not, and nothing could have logged in with it. A credential with a comment asserting
+    # what it is, and no check that the assertion holds, is worse than no comment.
+    password: "$6$FNRiK45R/TSwA7m4$HdImOzaZZxm6UoSabgCs7kQuSRkhCmPsFi15RF/Kf2NKukucZyzh7F4MKteEfftrOIg41KHZ1xgSxzgaesX3C1"
 
+  # Key-only, which is what §7 of the spec requires and what the harness should model.
+  # The key is generated per checkout into $VM_WORK and is never committed.
   ssh:
     install-server: true
-    allow-pw: true
-
-  # ATTEMPT 4. Attempt 3 built the stack in early-commands and handed curtin
-  # `preserve: true`; curtin crashed with "'NoneType' object has no attribute 'size'".
-  # Separately, subiquity is documented to silently drop storage:config:mount:options, so
-  # the `subvol=` mounts would have been ignored even had curtin survived.
-  #
-  # So this attempt lets curtin build the stack the way it supports, and asks one question:
-  # does curtin create btrfs subvolumes on its own? Ubuntu's guided btrfs installs use @ and
-  # @home, so the capability exists somewhere; what is unknown is whether an autoinstall
-  # storage config reaches it. The verifier answers that, and it fails if the answer is no.
-  storage:
-    config:
-      - {type: disk, id: disk0, path: /dev/vda, ptable: gpt, wipe: superblock-recursive, preserve: false, grub_device: false}
-      - {type: disk, id: disk1, path: /dev/vdb, ptable: gpt, wipe: superblock-recursive, preserve: false}
-
-      - {type: partition, id: p_esp, device: disk0, size: 512M, flag: boot, grub_device: true}
-      - {type: format, id: f_esp, volume: p_esp, fstype: fat32}
-      - {type: mount, id: m_esp, device: f_esp, path: /boot/efi}
-
-      # /boot stays outside the encryption: GRUB has to read a kernel before anything can
-      # be unlocked.
-      - {type: partition, id: p_boot, device: disk0, size: 2G}
-      - {type: format, id: f_boot, volume: p_boot, fstype: ext4}
-      - {type: mount, id: m_boot, device: f_boot, path: /boot}
-
-      - {type: partition, id: p_raid0, device: disk0, size: 20G}
-      - {type: partition, id: p_raid1, device: disk1, size: 20G}
-
-      - {type: raid, id: md0, name: md0, raidlevel: raid0, devices: [p_raid0, p_raid1]}
-      - {type: dm_crypt, id: crypt0, volume: md0, dm_name: cryptroot, key: cdl-vm-test-passphrase}
-
-      - {type: format, id: f_root, volume: crypt0, fstype: btrfs}
-      - {type: mount, id: m_root, device: f_root, path: /}
-
-  packages:
-    - mdadm
-    - cryptsetup
-    - cryptsetup-initramfs
-    - btrfs-progs
-    - restic
-    - rclone
-    - openssh-server
+    allow-pw: false
+    authorized-keys:
+      - "@@CDL_VM_PUBKEY@@"
 
   # Power off rather than reboot. install.sh boots the ISO's kernel directly with -kernel,
   # so a reboot re-enters the installer and it reinstalls in a loop -- observed 46 times

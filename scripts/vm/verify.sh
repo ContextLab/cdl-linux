@@ -8,21 +8,16 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck source=lib.sh
 source "$HERE/lib.sh"
 
-require ssh sshpass || warn "sshpass missing; will prompt for the VM password"
+require ssh || die "ssh is required"
+[[ -f "$VM_KEY" ]] || die "no harness key at $VM_KEY; run scripts/vm/install.sh first"
 
 SSH_OPTS=(-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
-          -o LogLevel=ERROR -p "$SSH_PORT")
+          -o LogLevel=ERROR -o IdentitiesOnly=yes -i "$VM_KEY" -p "$SSH_PORT")
 
 # Commands are assembled as strings and evaluated on the VM, which is the point: these are
 # assertions about the guest, not the host.
 # shellcheck disable=SC2029
-sshv() {
-    if command -v sshpass >/dev/null; then
-        sshpass -p "$VM_PASSWORD" ssh "${SSH_OPTS[@]}" "${VM_USER}@127.0.0.1" "$@"
-    else
-        ssh "${SSH_OPTS[@]}" "${VM_USER}@127.0.0.1" "$@"
-    fi
-}
+sshv() { ssh "${SSH_OPTS[@]}" "${VM_USER}@127.0.0.1" "$@"; }
 
 pass=0; fail=0
 check() {
