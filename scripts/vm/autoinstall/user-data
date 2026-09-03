@@ -46,6 +46,53 @@ autoinstall:
     authorized-keys:
       - "@@CDL_VM_PUBKEY@@"
 
+  # ATTEMPT 4. Attempt 3 built the stack in early-commands and handed curtin
+  # `preserve: true`; curtin crashed with "'NoneType' object has no attribute 'size'".
+  # Separately, subiquity is documented to silently drop storage:config:mount:options, so
+  # the `subvol=` mounts would have been ignored even had curtin survived.
+  #
+  # So this attempt lets curtin build the stack the way it supports, and asks one question:
+  # does curtin create btrfs subvolumes on its own? Ubuntu's guided btrfs installs use @ and
+  # @home, so the capability exists somewhere; what is unknown is whether an autoinstall
+  # storage config reaches it. The verifier answers that, and it fails if the answer is no.
+  storage:
+    config:
+      - {type: disk, id: disk0, path: /dev/vda, ptable: gpt, wipe: superblock-recursive, preserve: false, grub_device: false}
+      - {type: disk, id: disk1, path: /dev/vdb, ptable: gpt, wipe: superblock-recursive, preserve: false}
+
+      - {type: partition, id: p_esp, device: disk0, size: 512M, flag: boot, grub_device: true}
+      - {type: format, id: f_esp, volume: p_esp, fstype: fat32}
+      - {type: mount, id: m_esp, device: f_esp, path: /boot/efi}
+
+      # /boot stays outside the encryption: GRUB has to read a kernel before anything can
+      # be unlocked.
+      - {type: partition, id: p_boot, device: disk0, size: 2G}
+      - {type: format, id: f_boot, volume: p_boot, fstype: ext4}
+      - {type: mount, id: m_boot, device: f_boot, path: /boot}
+
+      - {type: partition, id: p_raid0, device: disk0, size: 20G}
+      - {type: partition, id: p_raid1, device: disk1, size: 20G}
+
+      - {type: raid, id: md0, name: md0, raidlevel: raid0, devices: [p_raid0, p_raid1]}
+      - {type: dm_crypt, id: crypt0, volume: md0, dm_name: cryptroot, key: cdl-vm-test-passphrase}
+
+      - {type: format, id: f_root, volume: crypt0, fstype: btrfs}
+      - {type: mount, id: m_root, device: f_root, path: /}
+
+  # Power off rather than reboot. install.sh boots the ISO's kernel directly with -kernel,
+  # so a reboot re-enters the installer and it reinstalls in a loop -- observed 46 times
+  # before it was noticed. Powering off ends the run cleanly and boot.py takes it from there.
+  shutdown: poweroff
+
+  packages:
+    - mdadm
+    - cryptsetup
+    - cryptsetup-initramfs
+    - btrfs-progs
+    - restic
+    - rclone
+    - openssh-server
+
   # Power off rather than reboot. install.sh boots the ISO's kernel directly with -kernel,
   # so a reboot re-enters the installer and it reinstalls in a loop -- observed 46 times
   # before it was noticed. Powering off ends the run cleanly and boot.py takes it from there.

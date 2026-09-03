@@ -36,6 +36,40 @@ if [[ ! -f "$VM_KEY" ]]; then
     ssh-keygen -t ed25519 -N '' -C 'cdl-vm-harness' -f "$VM_KEY" >/dev/null || die "ssh-keygen failed"
 fi
 
+# Validate the autoinstall before spending twenty minutes discovering it is wrong. An edit
+# to the identity block once deleted the entire storage section, and the installer silently
+# fell back to its default guided LVM layout: no md, no LUKS, ext4 root. Nothing failed, and
+# only the verifier noticed. Required keys are cheap to assert and this is where to do it.
+log "validating the autoinstall config"
+python3 - "$HERE/autoinstall/user-data" <<'PYCHECK' || die "autoinstall config is not valid"
+import sys, yaml
+required = {"version", "identity", "ssh", "storage", "packages", "late-commands"}
+try:
+    doc = yaml.safe_load(open(sys.argv[1]))
+except yaml.YAMLError as e:
+    sys.exit(f"  not valid YAML: {e}")
+a = doc.get("autoinstall")
+if not isinstance(a, dict):
+    sys.exit("  no top-level 'autoinstall' mapping")
+missing = required - set(a)
+if missing:
+    sys.exit(f"  missing required keys: {sorted(missing)}")
+cfg = a["storage"].get("config") or []
+kinds = {e.get("type") for e in cfg}
+for need in ("disk", "partition", "raid", "dm_crypt", "format", "mount"):
+    if need not in kinds:
+        sys.exit(f"  storage config has no '{need}' entry; the layout would not be built")
+ids = {e.get("id") for e in cfg}
+for e in cfg:
+    for k in ("device", "volume"):
+        if isinstance(e.get(k), str) and e[k] not in ids:
+            sys.exit(f"  {e.get('id')} references unknown {k} '{e[k]}'")
+    for d in e.get("devices", []):
+        if d not in ids:
+            sys.exit(f"  raid {e.get('id')} references unknown device '{d}'")
+print(f"  ok: {len(cfg)} storage entries, types {sorted(kinds)}")
+PYCHECK
+
 log "building the cloud-init seed"
 seed_dir="$VM_WORK/seed"
 rm -rf "$seed_dir" && mkdir -p "$seed_dir"
