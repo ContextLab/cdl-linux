@@ -77,8 +77,11 @@ Source: `notes/reviews/2026-09-02-cdl-box-deep-audit.md`
   verified boot, because the initrd is unvalidated and `/boot` is unencrypted by necessity.
 - [x] **A11. Model capacity** given as a table of workloads against 16 GB, marked as
   estimates from parameter counts rather than measurements, with B4 to replace them.
-- [ ] **A12. Branding stages**, if wanted: GRUB menu, Plymouth, `/etc/issue`, console login,
-  shell. Artwork and config only, never replacing signed executables.
+- [x] **A12. Branding**, §9.6. Six stages with their mechanisms and failure modes. Hard rule:
+  artwork and config only, never a signed executable, since replacing shim/GRUB/kernel means
+  disabling Secure Boot or enrolling our own key. Every branded stage keeps an unbranded
+  escape (GRUB recovery entry, Plymouth Escape, tty2 plain getty), because branding that
+  removes a diagnostic is a cost paid at the worst moment.
 - [ ] **A13. Regenerate the whitepaper + PDF** from the corrected spec. Its central argument
   (headless, not a distribution, SSH-primary) is now partly obsolete.
 

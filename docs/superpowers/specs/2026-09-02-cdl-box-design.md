@@ -634,6 +634,32 @@ The part that decides whether this is pleasant to use daily.
 Theming for the shell side is configured on the box, and the client terminal's own
 configuration (fonts, window) stays on the client, where it belongs.
 
+### 9.6 Branding, stage by stage
+
+"A branded boot" is not one thing. It is six, each with a different mechanism and a
+different failure mode, and the point of listing them is that skipping any one leaves an
+obviously stock screen in the middle of an otherwise finished sequence.
+
+| Stage | What we do | Constraint |
+|-|-|-|
+| Firmware / OEM splash | Nothing. It is not ours | Outside our control on this hardware |
+| shim, MokManager | **Nothing** | These are Canonical's signed binaries. Replacing one breaks Secure Boot; see below |
+| GRUB | Menu title, colours, background, and a visible **Recovery** entry | GRUB's own documentation warns that early graphical modes can fail on some hardware, so the theme degrades to a plain text menu rather than to a blank screen |
+| Plymouth | Splash plus the LUKS passphrase prompt | Needs a working text fallback, and **Escape must reveal the boot log**. A branded splash that hides a failure is worse than no splash |
+| getty / login | `/etc/issue`, showing hostname, tailnet name and a one-line hint | Plain text, and it is the first thing a person at the machine reads |
+| After login | The `cdl` home screen (§9.1) | |
+| Shell, dashboard, docs | One palette, used consistently (§9.5) | |
+
+**The hard rule: artwork and configuration only, never a signed executable.** Ubuntu's chain
+validates shim, GRUB, the kernel and its modules (§2.1.1). Replacing any of those with a
+rebuilt copy means either disabling Secure Boot or enrolling our own key, and both are
+larger changes than a nicer boot screen justifies. Themes, backgrounds, fonts, colours and
+config files are not signed and are ours to change.
+
+**Every branded stage keeps an unbranded escape**, because branding that removes a
+diagnostic is a cost paid at the worst moment: GRUB keeps its recovery entry and its edit
+key, Plymouth keeps Escape, and tty2 keeps a plain getty (§9.2).
+
 ## 10. Backup
 
 There is no NAS. The machine goes in an office, and the striped array has no redundancy, so
