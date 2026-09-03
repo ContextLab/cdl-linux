@@ -78,7 +78,7 @@ launcher. It does not bring back a display session, and none of the risk that ca
 | Distribution | **Ubuntu Server 26.04 LTS** | Signed NVIDIA modules under Secure Boot; five years of updates; the CUDA path is well-trodden |
 | Install | Stock installer, minimal, **no** `ubuntu-desktop` | Nothing needs a display |
 | Kernel | Stock HWE | The AX210 wifi is on in-kernel `iwlwifi`, so no firmware package is needed (measured) |
-| Secure Boot | **On** | Signed NVIDIA modules load; nothing here needs hibernation |
+| Secure Boot | **On** | Signed NVIDIA modules load; nothing here needs hibernation. **Not the same as verified boot**, see §2.1.1 |
 | Swap | 8 GiB file | Sized for pressure relief, not for hibernation |
 
 ### 2.1 Storage: one striped 2 TB volume
@@ -123,6 +123,19 @@ was lost. The Ubuntu installer cannot produce that layout, and building it by ha
 contradicts §3's stock-installer premise. It should be revisited if the storage layout is ever
 rebuilt outside the installer.
 
+### 2.1.1 What Secure Boot buys, and what it does not
+
+Ubuntu's chain validates the shim, GRUB, the kernel and kernel modules, which is what lets
+the signed NVIDIA modules load. **The initrd is not validated in that chain.** Anyone who can
+write to `/boot` can therefore change what runs before the root filesystem is unlocked, and
+§2.1 leaves `/boot` unencrypted by necessity, since GRUB has to read a kernel before anything
+can be decrypted.
+
+So this design claims **signed kernel and modules**, and does **not** claim verified boot.
+The gap is real rather than theoretical, and it is part of what physical access to the
+machine buys an attacker. Stating it narrowly is the point: a security property described
+more broadly than it holds is worse than one nobody claimed.
+
 ### 2.2 Two hardware findings that need OS-level fixes
 
 Both came out of the firmware walk and neither has a firmware setting to fix it.
@@ -158,6 +171,19 @@ these are the starting values:
 | Hysteresis | The 15 °C gap between those thresholds, plus the 60 s dwell, which is what stops it oscillating once a minute |
 | Recovery | On unit stop or failure, `max_perf_pct` is restored to 100. A dead thermal daemon must not leave the machine throttled silently |
 | `no_turbo` | Set only if stepping reaches the floor and the package is still ≥ 90 °C |
+
+**The GPU needs its own policy, and the thresholds above are the CPU's.** They are different
+devices with different limits, sensors and remedies: the package is throttled through
+`intel_pstate`, while the GPU's levers are a power cap (`nvidia-smi -pl`) and refusing to
+admit work. Starting values, equally provisional and equally due for measurement under B4:
+
+| Parameter | Value |
+|-|-|
+| Sample | GPU temperature from `nvidia-smi`, on the same 5 s interval |
+| Soft limit | ≥ 80 °C: reduce the power cap by 15 W, floor 80 W |
+| Recover | ≤ 70 °C for 60 s: raise by 15 W, ceiling the card's default |
+| Admission | ≥ 87 °C: refuse to load a new model or start a training run, and say why |
+| Never | Kill a running job on temperature. The card throttles itself, and losing an hour of training to a thermal spike is worse than the spike |
 
 **"Refusing to start work" applies to exactly one thing: `cdl-thermal` publishes a gate that
 the model-server wrapper reads before loading a new model.** It does not stop training runs,
@@ -321,9 +347,21 @@ The stack, installed by `20-nvidia.sh` and `40-ml.sh`:
   with checkpoints. Read-only, and never in the backup path (§10.4).
 - Jupyter available but bound to localhost, reached by SSH port-forward rather than exposed.
 
-16 GB of VRAM sets the realistic ceiling: LoRA and QLoRA fine-tunes of 7B-class models, not
-full fine-tunes of large ones. The spec says so plainly so that nobody plans around capacity
-the card does not have.
+16 GB of VRAM sets the ceiling, and it is worth stating in numbers rather than adjectives so
+B2 and B4 can check it:
+
+| Workload | Fits in 16 GB? |
+|-|-|
+| Inference, 7-8B parameters at Q4 | Yes, roughly 5-6 GB resident, leaving room for a second small model |
+| Inference, 13-14B at Q4 | Yes, roughly 9-10 GB, one model only |
+| Inference, 30B+ at Q4 | No |
+| QLoRA fine-tune, 7-8B, 4-bit base, short sequences | Yes, and this is the intended training workload |
+| LoRA fine-tune, 7-8B, 16-bit base | Marginal; depends on sequence length and batch size |
+| Full fine-tune of anything above about 1B | No |
+
+These are estimates from parameter counts and quantisation, **not measurements on this
+card**. B4 replaces them with measured figures. They are here so a plan built on them is
+checkable rather than vague.
 
 ### 6.1 The GPU lock contract
 
@@ -365,7 +403,17 @@ less predictably.
 
 - **Tailscale** for reachability, so the box is available from a laptop or phone without
   port-forwarding or a public address.
-- **OpenSSH**, key-only, password authentication off, bound to the tailnet and the LAN.
+- **OpenSSH**, key-only, bound to the tailnet and the LAN. The specifics, because "key-only"
+  is the sort of claim that is true of the config file and false of the running daemon:
+  `PasswordAuthentication no`, `KbdInteractiveAuthentication no`, `PermitRootLogin no`, and
+  `AllowGroups cdl` so a future account does not get SSH merely by existing. **B1a asserts
+  the *effective* configuration with `sshd -T`**, not the contents of `sshd_config`, since an
+  `Include` or a `Match` block can make the two differ.
+- **Console authentication is a separate problem with a separate answer.** SSH takes keys;
+  the console takes a Unix password, because there is no key to present when you are standing
+  at the machine. That password is also what `sudo` takes, so it needs to be a real one.
+  Unlocking the disk authenticates the *disk*, not the person, which is why §9.1 puts a login
+  after it.
 - **`mosh`** for sessions over poor links, which matters more than it sounds when the
   alternative is a dropped agent session.
 - **The model endpoint is served on the tailnet**, so other devices use this machine's GPU

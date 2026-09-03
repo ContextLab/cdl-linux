@@ -7,13 +7,21 @@ Status key: `[ ]` not started · `[~]` in progress · `[x]` done · `[!]` blocke
 
 ## Now
 
-- [~] **V1. Run the VM install end to end.** First attempt failed at `hdiutil attach`:
-  macOS cannot mount an Ubuntu hybrid ISO ("no mountable file systems"). Fixed by extracting
-  `casper/vmlinuz` and `casper/initrd` with `bsdtar`, which reads ISO9660 directly. Second
-  attempt is running; subiquity's UI came up. `scripts/vm/install.sh`. The autoinstall's
-  `early-commands` path (md → LUKS → btrfs + three subvolumes, handed to curtin as
-  `preserve: true`) is **UNVERIFIED** and this is what settles it. Expect failure on the
-  first attempt; curtin's `preserve: true` handling for a pre-built stack is the risky part.
+- [~] **V1. Run the VM install end to end** (`scripts/vm/install.sh`). Settles whether the
+  autoinstall's `early-commands` path works: md → LUKS → btrfs with three subvolumes, handed
+  to curtin as `preserve: true`. Curtin's handling of a pre-built stack is the risky part.
+  - Attempt 1 failed at `hdiutil attach`: macOS cannot mount an Ubuntu hybrid ISO at all
+    ("no mountable file systems"). Fixed by extracting `casper/vmlinuz` and `casper/initrd`
+    with `bsdtar`, which reads ISO9660 directly.
+  - Attempt 2 stopped at subiquity's serial-mode prompt: the autoinstall never took effect.
+    Cause was the kernel cmdline `ds=nocloud-net;s=/cdrom/`, which points cloud-init at the
+    *install ISO* (no `user-data` on it) and so stopped it discovering the CIDATA-labelled
+    seed volume that has one. Fixed by passing `autoinstall` alone and letting NoCloud find
+    the seed by label.
+  - Attempt 3: **`early-commands` ran the whole storage stack** -- `mdadm --create`,
+    `cryptsetup luksFormat`, `cryptsetup open`, `mkfs.btrfs`, and all three subvolumes
+    (`@`, `@home`, `@models`). Subiquity applied the autoinstall config through every stage.
+    Waiting on completion.
 - [ ] **V2. Boot it and answer the LUKS prompt.** `scripts/vm/boot.py`. Tests the unlock
   path the real machine will use.
 - [ ] **V3. Run the verifier.** `scripts/vm/verify.sh`. It now asserts `@`, `@home`,
@@ -28,32 +36,31 @@ Status key: `[ ]` not started · `[~]` in progress · `[x]` done · `[!]` blocke
 
 Source: `notes/reviews/2026-09-02-cdl-box-deep-audit.md`
 
-- [x] **A1. Console interface section (§9).** Done: boot chain, no autologin, explicit `cdl`
-  launcher (never `.profile`), tty2 recovery getty, separate local/SSH workspaces, transcript
-  sensitivity, zellij resurrection disabled. Original text below for reference.
-- [-] ~~A1 (original).~~ Authenticated `cdl` home screen on tty1,
-  recovery VT, plain-shell escape. **Do not launch zellij from `.profile`** — it would
-  capture `scp`, `rsync`, git-over-SSH and recovery sessions. Local inference at the console
-  is a stated use case and should be a first-class action.
+- [x] **A1. Console interface section (§9).** Boot chain, no autologin, an explicit `cdl`
+  launcher never invoked from `.profile` (it would capture `scp`, `rsync`, git-over-SSH and
+  recovery sessions), tty2 as an ordinary recovery getty, and local inference as a
+  first-class action on the home screen.
 - [x] **A2. Rewrite §3** to the one-script install model. Adds the properties that matter
   (idempotent, vanilla Ubuntu only, refuses rather than guesses, per-module runnable, does
   not touch storage) and states that uninstall is unsupported rather than half-working.
 - [x] **A3. Local vs SSH workspaces** separate by default, `--shared` lists connected
   clients first. In §9.3.
-- [ ] **A4. Auth split**: strong Unix password for console and sudo; SSH key-only, no root
-  login, an allow-group, and `sshd -T` tests of the effective config.
+- [x] **A4. Auth split.** §7: explicit sshd directives, `AllowGroups cdl`, and B1a asserts
+  the *effective* config via `sshd -T` rather than the file, since Include/Match can differ.
 - [x] **A5. Session logging sensitivity.** §9.4: mode 0600, excluded from backup by default,
   rotated on §11.1's schedule, zellij resurrection disabled.
-- [ ] **A6. Thermal: a separate GPU policy.** §2.3 sets CPU package thresholds only.
+- [x] **A6. GPU thermal policy** added alongside the CPU one: power cap via `nvidia-smi -pl`,
+  admission refusal at 87 °C, and never killing a running job on temperature.
 - [ ] **A7. Backup second copy operational detail**: retention, capacity, encryption,
   alerting, ownership, restore-test cadence.
 - [ ] **A8. Rollback**: `/boot` and root-subvolume consistency across kernel changes.
 - [ ] **A9. Network behaviour** before Tailscale enrolment, and during failure or
   reauthentication. Tailnet reachability is not authorisation to read prompts or dashboard
   data.
-- [ ] **A10. Do not claim full verified boot.** Ubuntu's chain validates shim, GRUB, kernel
-  and modules; the initrd is not validated, so the claim has to be narrower.
-- [ ] **A11. Model capacity stated testably** rather than "7B-class".
+- [x] **A10. Verified-boot claim narrowed.** New §2.1.1: signed kernel and modules, *not*
+  verified boot, because the initrd is unvalidated and `/boot` is unencrypted by necessity.
+- [x] **A11. Model capacity** given as a table of workloads against 16 GB, marked as
+  estimates from parameter counts rather than measurements, with B4 to replace them.
 - [ ] **A12. Branding stages**, if wanted: GRUB menu, Plymouth, `/etc/issue`, console login,
   shell. Artwork and config only, never replacing signed executables.
 - [ ] **A13. Regenerate the whitepaper + PDF** from the corrected spec. Its central argument

@@ -40,6 +40,12 @@ hdiutil makehybrid -quiet -iso -joliet -default-volume-name CIDATA \
 # --- 3. kernel and initrd ---------------------------------------------------------------
 # The `autoinstall` kernel argument is what stops subiquity pausing for confirmation, and
 # a kernel argument means booting the ISO's kernel directly rather than via its bootloader.
+#
+# It is `autoinstall` ALONE, with no `ds=` override. An earlier version passed
+# `ds=nocloud-net;s=/cdrom/`, which points cloud-init at the install ISO -- a disc that
+# contains no user-data -- and so prevented it from discovering the CIDATA-labelled seed
+# volume that does. The installer then came up interactive and sat at a prompt. Letting
+# NoCloud find the seed by its volume label is both simpler and the thing that works.
 
 if [[ ! -f "$VM_WORK/vmlinuz" || ! -f "$VM_WORK/initrd" ]]; then
     log "extracting kernel and initrd from the ISO"
@@ -81,7 +87,7 @@ log "installing (unattended; this takes a while and prints the installer's conso
     -machine "$QEMU_MACHINE" -cpu "$QEMU_CPU" -smp "$VM_CPUS" -m "$VM_MEM" \
     "${FIRMWARE[@]}" \
     -kernel "$VM_WORK/vmlinuz" -initrd "$VM_WORK/initrd" \
-    -append "console=ttyAMA0 autoinstall ds=nocloud-net;s=/cdrom/ ---" \
+    -append "console=ttyAMA0 autoinstall ---" \
     -drive "if=none,id=hd0,format=qcow2,file=$DISK0" -device virtio-blk-pci,drive=hd0,serial=cdl0 \
     -drive "if=none,id=hd1,format=qcow2,file=$DISK1" -device virtio-blk-pci,drive=hd1,serial=cdl1 \
     -drive "if=none,id=cd0,format=raw,media=cdrom,readonly=on,file=$ISO" -device virtio-blk-pci,drive=cd0 \
