@@ -10,7 +10,7 @@ A laptop with a discrete GPU is a compromise in both directions. It is heavier a
 
 We propose to stop treating it as a laptop: put it in the office, leave it on, reach it over SSH, and let it do three things continuously, namely serve local models to whatever device you are actually using, run coding agents in sessions that survive a dropped connection, and fine-tune models on a GPU that would otherwise be idle. In other words, the hardware is already bought (and mostly unused), so what we are proposing is a change of posture rather than of capability.
 
-A second motivation may matter more than it sounds, which is that configuring a machine this carefully is something we would like to do once rather than repeatedly. The whole setup is therefore a script rather than a memory of what worked, so that the machine can be rebuilt from it after a failure, a wipe, or a decision to move to different hardware.
+A second motivation may matter more than it sounds, which is that configuring a machine this carefully is something we would like to do once rather than repeatedly. The setup is therefore a script rather than a memory of what worked, so that the machine can be rebuilt from it after a failure, a wipe, or a decision to move to different hardware.
 
 ## What it is
 
@@ -28,7 +28,7 @@ There is no graphical stack: no X, no Wayland, no compositor, no display manager
 
 It matters concretely, because the encrypted root is unlocked by a passphrase typed at the keyboard. There is deliberately no remote unlock, so any reboot means someone stands at the machine, and the screen they are looking at should be somewhere work happens. Using a local model from the console is a first-class use case rather than a fallback.
 
-**Ligatures on a text console are a real technical problem, and the solution is worth naming.** The kernel's virtual terminal draws 1-bit bitmap glyphs from a 512-entry table and has no text-shaping engine at all, while a ligature is a shaping substitution, so no console font can produce one. We therefore run `kmscon` on the first terminal, which renders through freetype and does shape, giving Fira Code with its ligatures on the machine's own screen without a compositor and without the screen-locking problem a compositor would bring. The second terminal stays an ordinary kernel console, deliberately: `kmscon` is one more thing that can fail, and the recovery terminal must not depend on it.
+**Ligatures on a text console are a genuine technical obstacle, and the way around it is specific enough to state.** The kernel's virtual terminal draws 1-bit bitmap glyphs from a 512-entry table and has no text-shaping engine at all, while a ligature is a shaping substitution, so no console font can produce one. We therefore run `kmscon` on the first terminal, which renders through freetype and does shape, giving Fira Code with its ligatures on the machine's own screen without a compositor and without the screen-locking problem a compositor would bring. The second terminal stays an ordinary kernel console, deliberately: `kmscon` is one more thing that can fail, and the recovery terminal must not depend on it.
 
 ## How the rest works
 
@@ -36,7 +36,7 @@ It matters concretely, because the encrypted root is unlocked by a passphrase ty
 
 **Serving models.** Ollama is the endpoint, on a fixed port bound to the Tailscale network, and it is what other devices point at. `llama.cpp` behind `llama-swap` is a second, separate endpoint on localhost for the cases Ollama does not cover. There is no reverse proxy and no unified router, because inventing one is work with no payoff at this scale.
 
-**Training.** A wrapper takes an exclusive lock on the GPU, stops the model servers, runs, then restarts them. Serving and training do not overlap. On 16 GB of VRAM that is the only policy that is genuinely deterministic, and it is honest about the cost: a request to the model endpoint during a training run is refused rather than answered slowly.
+**Training.** A wrapper takes an exclusive lock on the GPU, stops the model servers, runs, then restarts them. Serving and training do not overlap. On 16 GB of VRAM it is the one policy of the three we considered whose behaviour is predictable, and it is honest about the cost: a request to the model endpoint during a training run is refused rather than answered slowly.
 
 **Backups** go to a Hugging Face bucket through `restic`, with a second copy pulled by a different machine that holds no credential this one can read.
 
@@ -48,7 +48,7 @@ Ordered by how much damage a wrong answer does. We would rather hear about these
 
 **2. Every reboot needs someone at the machine.** The encrypted root is unlocked at the console and there is deliberately no remote unlock, so a power cut on a Friday leaves an unreachable machine until someone drives in (and from outside, an unreachable machine looks identical to a dead one). A UPS would convert the commonest cause into nothing at all, and may be the cheapest available fix. Binding the key to the TPM removes the trip, but means anyone who steals the whole machine and boots it gets the data.
 
-**3. The storage layout may not be buildable with the stock installer, and we are finding out now.** The spec asks for RAID0, LUKS, btrfs, and root installed into a subvolume. Building the stack ahead of the installer and handing it over crashes the installer outright, and Ubuntu's installer is separately documented to discard the mount options a subvolume root needs, silently. A VM harness is working through this before any real disk is touched. If it cannot be done, the options run from dropping subvolume rollback to abandoning the stock installer, which is most of what a custom ISO would have cost.
+**3. Part of the storage layout cannot be built by the stock installer, and we now know which part.** A VM install settled it: RAID0, LUKS, btrfs, `/boot` outside the encryption and an unlock at the console all work, and the machine boots off the array. What does not work is the subvolumes. Ubuntu's installer puts root in the filesystem's top level and creates none, which costs us the ability to snapshot the system independently of home, and that was the reason for having subvolumes at all. Our answer is to migrate root into a subvolume from the install script afterwards. Moving a live root filesystem is the kind of operation that works until it does not, so it is gated on running in the VM, repeatedly, before it goes near the machine.
 
 **4. Secure Boot here means signed kernel and modules, not verified boot.** Ubuntu's chain validates the shim, GRUB, the kernel and its modules, but the initrd is not validated and `/boot` is unencrypted by necessity. Anyone with physical access can alter what runs before the disk is unlocked. We state this narrowly on purpose, since a security property described more broadly than it holds is worse than one nobody claimed.
 
@@ -56,14 +56,14 @@ Ordered by how much damage a wrong answer does. We would rather hear about these
 
 **6. Being on the tailnet is not the same as being authorised.** The dashboard and the model endpoint are reachable by every device on the tailnet, and by every device shared into it, which means prompts and output too. The dashboard checks caller identity; the model endpoint cannot, because Ollama has no per-caller authentication. For a one-person tailnet that is close enough to fine, and if the tailnet is ever shared, the endpoint is shared with it.
 
-**7. Finally, the premise deserves a challenge.** This is worth building if a GPU you can reach from anywhere, all the time, is genuinely more useful than a GPU in a laptop you open sometimes. If the answer turns out to be that the models you actually use are hosted ones (and that the local GPU is a hobby), then this may be a weekend of setup in service of a workflow that does not yet exist. What would settle it: build the first three milestones, use the machine over SSH for a week, and notice whether you keep going back to it.
+**7. Finally, the premise deserves a challenge.** Building this makes sense if a GPU you can reach from anywhere, all the time, does more for you than a GPU in a laptop you open sometimes. If the answer turns out to be that the models you actually use are hosted ones (and that the local GPU is a hobby), then this may be a weekend of setup in service of a workflow that does not yet exist. What would settle it: build the first three milestones, use the machine over SSH for a week, and notice whether you keep going back to it.
 
 ## Where this stands
 
-The design is specified and none of it is installed on real hardware. Several of its riskiest questions have been answered by experiment rather than by argument, and two of those experiments changed the design.
+The design is specified and none of it is installed on the Tensorbook yet. Several of its riskiest questions have been answered by experiment rather than by argument, and two of those experiments changed the design.
 
 The backup path was one. Testing it showed that `restic` cannot initialise a repository on a Hugging Face bucket through its own S3 support at all, because it reads the account namespace as the bucket name. Routed through `rclone` instead, every step passes, including a byte-identical restore. That added a dependency the design did not previously have.
 
-The storage layout is the other, and it is still in progress. The VM harness has already found that the installer will not build the layout the way the spec described it, and that the harness's own first verifier would have passed a filesystem that did not match. Both are better found in a virtual machine than on a laptop with your work on it.
+The storage layout was the other. The VM harness found that the installer will not build the layout the way the spec described it, and, separately, that the harness's own first verifier would have passed a filesystem that did not match. Both are better found in a virtual machine than on a laptop with your work on it, and the second is the more uncomfortable of the two: a test that passes the wrong answer is worse than no test, because it converts an open question into a false one.
 
 What we would like from a reader: a judgement on the premise, an opinion on whether striping two drives with no immutable backup is a trade you would make, and any failure mode in the boot or recovery path we have not thought of.
