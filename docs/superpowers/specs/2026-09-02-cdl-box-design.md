@@ -1,4 +1,4 @@
-# `cdl-box` - a headless model and agent workstation
+# `cdl-box` - a console-first model and agent workstation
 
 **Status:** draft 1, for review.
 **Supersedes:** everything in `docs/archive/` (see that directory's README for what was
@@ -8,38 +8,67 @@ below that describes this machine was measured there, not assumed.
 
 ## 1. What this is
 
-A minimal Ubuntu Server install on the Tensorbook that runs continuously, is reached over
-SSH, and does three jobs:
+**`cdl-linux` is one install script.** It runs on a stock Ubuntu Server 26.04 machine and
+turns it into a workstation that serves local models, runs coding agents, and trains on the
+GPU. The model is Lambda Stack, which is already on this hardware and installs with
+`wget -nv -O- https://lambda.ai/install-lambda-stack.sh | sh -`: one command, vanilla
+Ubuntu, hardware detected, everything configured. We want that experience.
 
-1. **Runs coding agents** (Claude Code, Codex, Gemini, OpenCode) in terminal sessions that
-   survive disconnection.
-2. **Serves local models** to the machine itself and to other devices on the tailnet.
-3. **Trains and fine-tunes models** on the RTX 3080, with a working CUDA and PyTorch stack.
+```bash
+git clone https://github.com/ContextLab/cdl-linux && cd cdl-linux && ./install.sh
+```
 
-The interface is a terminal you SSH into, plus a small web dashboard for the things a
-terminal is bad at answering (§8).
+Running it twice changes nothing the second time. Running it on a fresh Ubuntu Server
+install of the same version reproduces the machine.
 
-### 1.1 The machine is headless, and that decision does most of the work
+### 1.1 It is public, and it is not a product
 
-No compositor, no display manager, no session lock, no autologin, no keybindings, no X or
-Wayland. The internal panel shows a console login and nothing else.
+The repository is public and others are welcome to use it or build on it. **There is no
+maintenance promise, no support, and no testing beyond one person's daily use**, and saying
+so plainly is fairer than implying otherwise by omission. Contributions are welcome;
+guarantees are not offered.
 
-This comes first because it is what makes the rest small. A previous design
-carried a display session, and with it a locking problem that had no clean solution (the
-kiosk compositor under consideration ships no session-lock protocol at all), plus
-autologin, plus a compositor crash-recovery path. None of that exists here.
+That decision is why this is **not a distribution**. A deep audit on 2026-09-02 laid out
+what a real one needs: a remastered installer ISO, CDL-owned signed Debian packages, a
+signed APT repository with stable and staging channels, signing-key rotation and revocation,
+release manifests, SBOMs, source and licence compliance, and an upgrade and rollback policy
+for strangers. That list is correct, and every item on it exists to serve people who install
+your software and then depend on it. **We are not taking that commitment**, so we do not
+build the apparatus that discharges it. If this ever acquires users who need those
+guarantees, the packages are the natural unit to add signing to, and that is the upgrade
+path.
 
-**Hibernation is out of scope for the same reason.** An always-on server does not
-hibernate, so the Secure Boot and kernel-lockdown conflict recorded in the hardware profile
-stops being a blocker and becomes an observation. Secure Boot stays **on**.
+### 1.2 Two install paths, because a script cannot repartition the disk it runs from
 
-### 1.2 What this is not
+| Situation | Path |
+|-|-|
+| **Fresh machine**, and you want the storage layout in §2.1 | Install Ubuntu Server with `install/autoinstall.yaml`, which declares the layout, then run `./install.sh` |
+| **Existing machine**, whatever its storage | Run `./install.sh`. It configures everything except storage, and says so rather than pretending |
 
-- **Not an agent orchestration system.** Agents run in `zellij` sessions and a human
-  decides what to run. The archived design describes the orchestration layer; it may get
-  built later, on top of this, and this does not depend on it.
-- **Not a custom ISO.** §3.
-- **Not multi-user.** One person, one machine, one tailnet.
+The split is honest rather than convenient: the striped, encrypted layout has to be built
+before there is a root filesystem to run a script from. Lambda Stack has the same boundary
+and does not touch your disks either.
+
+### 1.3 Console-first, not headless
+
+Draft 2 said "headless" and meant two different things by it. **No graphical stack** is
+correct and stays: no X, no Wayland, no compositor, no display manager, no session lock, no
+autologin. **A local console that is only good enough for emergencies** was a mistake, and
+the audit was right to catch it. The machine now lives in an office you have to visit to
+type a passphrase, so the console you are standing in front of should be usable.
+
+So the local experience is a **branded, authenticated text console** (§9), and SSH is an
+equal interface rather than the only one. That costs almost nothing: a getty, a login, and a
+launcher. It does not bring back a display session, and none of the risk that came with one.
+
+### 1.4 What it is not
+
+- **Not an agent orchestration system.** Agents run in `zellij` workspaces and a human
+  decides what to run. The archived design describes an orchestration layer; this does not
+  depend on it and may never need it.
+- **Not a Linux distribution** (§1.1).
+- **Not multi-user.** One supported human operator, which is not the same as one Unix
+  account: services still run as their own least-privileged users.
 - **Not a general-purpose desktop.**
 
 ## 2. Base system
@@ -80,11 +109,12 @@ more heavily used one. Two consequences follow and both are requirements rather 
 - **SMART on both drives is monitored, and a warning is surfaced on the dashboard** (§8.1).
   On a striped pair, the first sign of trouble on either device is the only warning there
   will be.
-- **The backup becomes the only copy**, which lands awkwardly against
-  §10.1: the NAS runs no containers, so backups have no append-only protection yet. Until
-  the snapshot substitute in §10.1 is confirmed, this machine has **no redundancy and no
-  protected backup at the same time.** That is an exposure, it is stated here rather than
-  in a footnote, and confirming NAS snapshots is the cheapest thing that closes it.
+- **The backup becomes the only copy**, which lands awkwardly against §10.2: the Hugging
+  Face bucket has no versioning and no lifecycle rules, so nothing prevents the box deleting
+  its own backup history. Until the second copy in §10.2 exists, this machine has **no
+  redundancy and no protected backup at the same time.** That is an exposure, it is stated
+  here rather than in a footnote, and building the second copy is the cheapest thing that
+  closes it.
 
 **A considered alternative, rejected for a practical reason.** Two LUKS devices with btrfs
 spanning both (`-d raid0 -m raid1`) would stripe data while mirroring metadata, so a
@@ -228,7 +258,7 @@ interchangeable without work.
 
 Both trees live under `/srv/models` (`/srv/models/ollama`, `/srv/models/gguf`) so they share
 a **disk location**, which is all the sharing this spec claims. Whether a single copy can
-serve both is **spike S3** (§11): find whether an Ollama blob can be handed to
+serve both is **spike S3** (§12): find whether an Ollama blob can be handed to
 `llama-server` directly, for the exact versions and quantisations in use. Until that spike
 passes, assume a model wanted by both servers is stored twice.
 
@@ -237,15 +267,14 @@ passes, assume a model wanted by both servers is stored twice.
 16 GB, measured. That fits one large model, or one large plus one small, which is what
 `llama-swap` exists to manage.
 
-**The GPU lock is a contract, and it only works if every entry point honours it** (§6.1).
-When a training run holds the lock:
+**Training and serving do not overlap** (§6.1). Starting a training run stops the model
+servers, and they come back when it finishes. Draft 2 claimed a resident model would keep
+serving through a training run, which was not achievable under the lock protocol it
+described; the honest policy is the simpler one.
 
-- `llama-swap` **refuses to load a new model** and returns an error naming the holder. It
-  does not queue, because a queued inference request that arrives an hour later is worse
-  than a refusal.
-- **An already-resident model keeps serving.** Eviction on lock acquisition would make
-  training silently break inference, and the person training is usually the person serving.
-- Ollama is started under the same wrapper and behaves the same way.
+In practice a request to the model endpoint during a training run is refused rather than
+answered slowly, and both `cdl status` and the dashboard show the GPU as held by training
+with the holder named, so the cause is visible rather than mysterious.
 
 This is cooperative, not enforced. Anything that runs `python train.py` directly, without
 the wrapper, will take VRAM and the lock will not stop it.
@@ -274,22 +303,39 @@ the card does not have.
 
 ### 6.1 The GPU lock contract
 
-A `flock` only works if every entry point takes it, so the contract has to be written down
-rather than assumed:
+**Draft 2's protocol could not work, and it is worth saying why before replacing it.** It
+gave inference servers a *shared* lock held for their whole lifetime and required training to
+take an *exclusive* one. Under `flock` an exclusive lock cannot be acquired while any shared
+holder exists, so **training could never start while either server was running**. It then
+promised that an already-resident model would keep serving while training held the exclusive
+lock, which is the same contradiction from the other side: if training holds it exclusively,
+no shared holder exists.
+
+**The policy is exclusive workload: inference stops for training.** It is the only available
+option that is deterministic on 16 GB of VRAM, and it matches how the machine is used, since
+serving does not have to continue through a training run.
 
 | Element | Value |
 |-|-|
 | Lock file | `/run/cdl/gpu.lock`, created by a `tmpfiles.d` rule, mode 0664, group `cdl` |
-| Who takes it | `cdl-gpu <command>`, a wrapper that acquires the lock and `exec`s. **Ollama, `llama-swap` and every training entry point start under it** |
-| Mode | Exclusive for training; shared for inference servers, so two servers can coexist while a training run excludes both |
-| Timeout | Training waits up to 30 s then fails with the holder named. Inference does not wait at all: it refuses immediately (§5.3) |
-| Holder identity | The wrapper writes pid, command and start time into the lock file, so a refusal can say what is holding it rather than only that something is |
+| Who takes it | `cdl-gpu <command>`, a wrapper that acquires the lock and `exec`s. **Every training entry point starts under it** |
+| Mode | **Exclusive, always.** There is no shared mode, because the shared mode is what made the protocol impossible |
+| Inference servers | Do **not** hold the lock for their lifetime. `cdl-gpu train` stops `ollama` and `llama-swap` through systemd, waits for them to exit, then takes the lock |
+| Restart | Whatever was stopped is restarted when training exits, including on a crash or `SIGKILL`, through a `systemd` unit's `ExecStopPost` rather than a shell trap the wrapper might never run |
+| Confirmation | `cdl-gpu train` **names what it will stop and asks**, because that endpoint may be serving another device mid-request. `--force` skips the prompt for scripted runs |
+| Holder identity | Recorded in `/run/cdl/gpu/holder`, not in the lock file, since a lock file is a poor place to keep state |
 | Release | `flock` releases on process exit, including a crash, so a killed job cannot strand the GPU |
 
 **This is cooperative and the spec does not pretend otherwise.** A bare `python train.py`
 takes VRAM and honours nothing. The wrapper is made the path of least resistance (it is what
 the shell aliases and the systemd units call), which is the only enforcement available
 without a container or cgroup device policy, and neither earns its cost here.
+
+**If continuous serving ever matters more than determinism**, the alternative is a brief
+admission lock around model load and training start, plus a measured free-VRAM check, which
+lets existing inference coexist. It accepts a real risk of running out of memory, would need
+testing to characterise, and on 16 GB would refuse most of the same requests anyway, only
+less predictably.
 
 ## 7. Remote access
 
@@ -364,8 +410,10 @@ trusts `tailscale whois` for identity. It has no password of its own, because a 
 login on a single-user box is a liability rather than a control. If it cannot resolve a
 caller's tailnet identity, it refuses the request.
 
-**It is read-mostly by design.** The two write actions are idempotent and reversible from
-the terminal. Anything that could destroy work belongs in SSH, where the friction is
+**It is read-only, and §8.2 is the authority on that.** An earlier draft described two write
+actions here and declared the dashboard read-only one section earlier, which is the kind of
+contradiction that gets resolved by whoever implements it rather than by whoever wrote it.
+Anything that changes state belongs in the console or over SSH, where the friction is
 appropriate.
 
 ## 9. Terminal environment
@@ -457,7 +505,7 @@ preventing deletion inside that scope. Use one; it is free and it bounds the dam
   Hugging Face cache writes that tag, so the model cache is excluded for free.
 - **`/srv/models` is not backed up.** Weights are re-downloadable and large. Checkpoints and
   datasets that are *not* re-downloadable live in `/srv/models/keep`, which **is** backed up.
-- Restore drills are in B0 and B7 (§11), not deferred. A backup nobody has restored from is
+- Restore drills are in B0 and B7 (§12), not deferred. A backup nobody has restored from is
   a hypothesis.
 
 ### 10.4 Mounting the bucket as a drive: considered, rejected
@@ -549,7 +597,7 @@ should not fill its root subvolume with text.
 ### 11.3 Pinned CLI refresh
 
 The four agent CLIs are pinned (§4). They are refreshed **deliberately, together, and
-followed by B4's acceptance test**, because a silent auto-update to an agent CLI changes
+followed by B6's acceptance test** (which is where CLI acceptance lives), because a silent auto-update to an agent CLI changes
 behaviour mid-task. A monthly check that reports what is behind, without applying it, is
 enough.
 
@@ -581,13 +629,13 @@ A runbook that has been executed twice is the artifact; prose describing the lay
 
 | # | Milestone | Exit test |
 |-|-|-|
-| **B1** | Base install, headless, SSH, Tailscale, power policy | Reboot, **enter the LUKS passphrase at the machine**, and after boot completes it becomes reachable over the tailnet by name with no further intervention. `/proc/acpi/wakeup` shows XHCI disabled and `systemd-sleep` masked |
+| **B1** | Base install, console and SSH, Tailscale, power policy | Reboot, **enter the LUKS passphrase at the machine**, and after boot completes it becomes reachable over the tailnet by name with no further intervention. `/proc/acpi/wakeup` shows XHCI disabled and `systemd-sleep` masked |
 | **B1a** | Network exposure is what the spec says | From off-tailnet: SSH refused, dashboard refused, model port refused. From on-tailnet: SSH accepted, dashboard accepted. `mosh`'s UDP range reachable on the tailnet only. Jupyter bound to localhost and **not** reachable from another device even on the tailnet |
 | **B2** | NVIDIA, CUDA, PyTorch | `nvidia-smi` reports the 3080 and `torch.cuda.is_available()` returns true, both **after a reboot**, not only after install |
 | **B3** | Live with it | Several days of real work over SSH. This is a judgement, and it is the one that decides whether any of the rest is worth building |
 | **B4** | Ollama | A model answers on `11434` from **another device** on the tailnet. Measure and record actual VRAM use, load time, tokens/sec and package temperature under sustained load, because §2.3's thresholds are guesses until then |
 | **S3** | **Can one stored copy serve both servers?** (§5.2) | Hand an Ollama blob to `llama-server` for the exact quantisation in use. Pass means one copy; fail means storage is doubled and the spec says so |
-| **B5** | `llama-swap`, and the GPU lock | Codex talks to `llama-server` over Responses on `8081`. A training run holding the lock makes a new model load **refuse with the holder named**, while an already-resident model keeps serving |
+| **B5** | `llama-swap`, and the GPU lock | Codex talks to `llama-server` over Responses on `8081`. Then `cdl-gpu train` names the services it will stop, stops them, holds the GPU, and **restarts them when the run exits** -- including when the run is `SIGKILL`ed, which is the case a shell trap would miss |
 | **B6** | Agent CLIs, `zellij`, session logging | All four launch, authenticate and run a trivial task. Claude Code's phone steering still works, which is what §4.1 protects. Kill a session and confirm its `script(1)` log survives with the transcript intact |
 | **B7** | Backup, on the new machine | Restore `/home` to a scratch directory and diff it. Confirm the second copy (§10.2) is still pulling |
 | **B8** | Read-only dashboard | Panels in §8.1 match the machine's real state, checked from a phone. No write actions exist |
@@ -600,9 +648,8 @@ that needs finding out before the model-serving and agent layers get built on to
 
 | # | Question | Why it is open |
 |-|-|-|
-| 1 | Does `restic` work against the HF S3 gateway? | **S1 in §12, and it blocks B0.** The gateway supports only `ListObjectsV2`, drops `x-amz-meta-*`, restricts key shapes and redirects `GetObject` to a CDN. None of that obviously breaks `minio-go`, and none of it is confirmed |
-| 2 | Which machine holds the second backup copy, and how often does it pull? | §10.2 makes a second copy a requirement rather than advice, because the HF bucket has no versioning and no lifecycle rules. The schedule sets how long a wipe can go unnoticed |
+| 1 | Which machine holds the second backup copy, and how often does it pull? | §10.2 makes a second copy a requirement rather than advice, because the HF bucket has no versioning and no lifecycle rules. The pull schedule sets how long a wipe can go unnoticed. (The earlier question here, whether `restic` works against the gateway, was answered by spike S1 on 2026-09-02: not directly, but through `rclone` -- §10.5) |
 | 3 | Can one stored copy serve both Ollama and `llama-server`? | **S3 in §12.** Decides whether `/srv/models` holds one copy of a model or two |
-| 4 | Are `croft` and the Emacs LLM integration still wanted? | Both came from the original requirements list, which predates the headless decision |
+| 4 | Are `croft` and the Emacs LLM integration still wanted? | Both came from the original requirements list, which predates the console-first decision |
 | 5 | Is a UPS worth buying? | §7.1: it converts the commonest cause of an unattended reboot from an office trip into nothing. Cheap, and outside this spec |
-| 6 | Which GPU drives an external display, if one is ever attached | Deferred from M0. On a headless server it may never need answering |
+| 6 | Which GPU drives an external display, if one is ever attached | Deferred from M0. The console is text-only, so this only matters if a monitor is ever attached |

@@ -48,6 +48,16 @@ check "LUKS is open on md0"            "§2.1" "cryptroot"    "ls /dev/mapper/"
 check "the LUKS backing device is md0" "§2.1" "md0"          "sudo cryptsetup status cryptroot | grep device:"
 check "root is btrfs"                  "§2.1" "btrfs"        "findmnt -no FSTYPE /"
 check "root sits on the mapped device" "§2.1" "cryptroot"    "findmnt -no SOURCE /"
+
+# The three subvolumes are the part draft 1 of this harness did not check, so it passed a
+# flat btrfs root that does not match the spec. A verifier that accepts the wrong layout is
+# worse than no verifier, because it converts an open question into a false answer.
+check "subvolume @ exists"             "§2.1" "(^|/)@\$"     "sudo btrfs subvolume list / | awk '{print \\$NF}'"
+check "subvolume @home exists"         "§2.1" "@home"        "sudo btrfs subvolume list / | awk '{print \\$NF}'"
+check "subvolume @models exists"       "§2.1" "@models"      "sudo btrfs subvolume list / | awk '{print \\$NF}'"
+check "/ is mounted from subvol @"     "§2.1" "subvol=/@"    "findmnt -no OPTIONS /"
+check "/home is its own subvolume"     "§2.1" "subvol=/@home" "findmnt -no OPTIONS /home"
+check "/srv/models is its own subvolume" "§2.1" "subvol=/@models" "findmnt -no OPTIONS /srv/models"
 check "/boot is outside the encryption" "§2.1" "ext4"        "findmnt -no FSTYPE /boot"
 check "crypttab references md0"        "§2.1" "."            "grep -c . /etc/crypttab"
 
