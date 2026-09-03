@@ -259,6 +259,11 @@ The stack, installed by `20-nvidia.sh` and `40-ml.sh`:
 - PyTorch with CUDA, `transformers`, `datasets`, `peft`, `accelerate`, `bitsandbytes`.
 - **`uv` for every environment**, so packages hardlink from one shared cache instead of
   being copied per project.
+- **`hf-mount` for read-only access to Hub repos**, which is where mounting genuinely fits:
+  its README names *"Loading models and datasets without downloading the full repo"* and
+  *"Environments where disk space is limited"* as what it is best for. A large evaluation
+  dataset can be read lazily from `hf://` instead of occupying part of a 2 TB volume shared
+  with checkpoints. Read-only, and never in the backup path (§10.4).
 - Jupyter available but bound to localhost, reached by SSH port-forward rather than exposed.
 
 16 GB of VRAM sets the realistic ceiling: LoRA and QLoRA fine-tunes of 7B-class models, not
@@ -440,7 +445,32 @@ preventing deletion inside that scope. Use one; it is free and it bounds the dam
 - Restore drills are in B0 and B7 (§11), not deferred. A backup nobody has restored from is
   a hypothesis.
 
-### 10.4 One spike before this is relied on
+### 10.4 Mounting the bucket as a drive: considered, rejected
+
+**The idea:** mount the bucket with `hf-mount` and point a backup application at it, to get
+versioned backups. Rejected for two reasons, the first of which matters more.
+
+**Versioning is not the missing piece.** `restic` already stores versioned snapshots and can
+restore any of them; §10.2's gap is not versioning but **immutability**. A mounted bucket is
+writable by whatever mounted it, so anything that can write a backup can also delete every
+backup, exactly as with the S3 path. Changing the transport does not change who can delete,
+and no backup application can add a guarantee the storage underneath it does not provide.
+
+**Mounting also makes the transport worse.** `hf-mount`'s own README lists it as **not for**
+*"General-purpose networked filesystem (no multi-writer support, no cross-node file
+locking)"* and not for *"Workloads that need strong consistency (files can be stale for up
+to 10 s)"*. A repository needs consistent reads of its index and lock files, so this is the
+trap the round-1 research already recorded: `restic` has no native network-filesystem
+backend, and pointing its local backend at one runs its lock protocol over semantics its
+documentation never addresses. Borg's FAQ says the same thing more bluntly, advising against
+network filesystems for repository storage.
+
+`restic`'s S3 backend speaks the object API directly and needs no POSIX semantics over the
+network, which makes it the better path rather than the fallback. **The second copy in
+§10.2 stays the answer to deletion**, because immutability has to come from a place the box
+cannot reach, not from a different way of reaching the same place.
+
+### 10.5 One spike before this is relied on
 
 **Does `restic` work against the HF S3 gateway?** The gateway supports only
 `ListObjectsV2`, does not store `x-amz-meta-*`, restricts object key shapes, and redirects
