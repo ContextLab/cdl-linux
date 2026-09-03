@@ -116,9 +116,36 @@ more heavily used one. Two consequences follow and both are requirements rather 
   here rather than in a footnote, and building the second copy is the cheapest thing that
   closes it.
 
-### 2.1.2 The subvolumes may not be reachable from the stock installer
+### 2.1.2 The subvolumes are not reachable from the stock installer — measured
 
-**Open, and being settled by spike S2 (§12) as this is written.** The layout above wants
+**Settled by spike S2 on 2026-09-03. Everything in §2.1 works except the subvolumes.**
+
+A VM installed from `scripts/vm/autoinstall/user-data` and verified over SSH:
+
+| Assertion | Result |
+|-|-|
+| `md0` exists, is raid0, has two members | **PASS** |
+| LUKS open on `md0`, backing device is `md0` | **PASS** |
+| Root is btrfs on the mapped device | **PASS** |
+| `/boot` outside the encryption; `crypttab` references `md0` | **PASS** |
+| initramfs carries `cryptsetup` and md support | **PASS** |
+| The machine booted off the array, unlocking at the console | **PASS** |
+| Subvolumes `@`, `@home`, `@models` exist | **FAIL — none exist** |
+| `/` mounted from `subvol=/@` | **FAIL — `subvolid=5,subvol=/`** |
+
+`subvolid=5` is the filesystem's top level. **curtin does not create btrfs subvolumes from an
+autoinstall storage config**, and root is installed directly into the top-level subvolume.
+
+**The decision: migrate to `@` from `install.sh`** (option 2 below). The reasoning is that
+everything else already works, so abandoning the stock installer would discard a working
+layout to fix one property; and the objection to migration — that moving a live root
+filesystem works until it does not — is answerable here in a way it usually is not, because
+the VM harness can run the migration repeatedly and destructively at no cost. **It is not to
+run on the Tensorbook until it has run in the VM**, which is a milestone rather than a note.
+
+The options as they stood, kept because the decision may be revisited:
+
+**Original assessment, before the measurement:** The layout above wants
 three btrfs subvolumes with root installed into `@`. Two obstacles have been measured, and
 neither was anticipated:
 
@@ -136,7 +163,7 @@ consider them:
 | Option | Cost |
 |-|-|
 | **Root not in a subvolume**, with `@home` and `@models` created afterwards | Loses §11.4's rollback, which needs a snapshot of root. That is the reason `@` is here at all |
-| **Migrate to `@` from `install.sh`**: create it, move the filesystem into it, rewrite `fstab` and GRUB, reboot once | Coherent with the one-script model, but moving a live root filesystem is the kind of operation that works until it does not |
+| **Migrate to `@` from `install.sh`** — **chosen** | Coherent with the one-script model. Moving a live root filesystem is the kind of operation that works until it does not, which is why it is gated on passing in the VM first |
 | **Drop btrfs for root** and use ext4, keeping btrfs only for `/srv/models` | Simplest, and loses snapshots on the thing snapshots were for |
 | **Abandon the stock installer** for storage | Contradicts §1.2 and is most of what a custom ISO was going to cost |
 
@@ -882,6 +909,13 @@ the namespace stays in the endpoint and the bucket name stays a bare bucket name
 | Second backup | Incremental, 3.448 KiB stored |
 | `restic restore` + `diff -r` | **Byte-identical** |
 | `restic forget --keep-last 1 --prune` | Old index and pack deleted; `check` clean afterwards |
+
+**Confirmed from inside a guest on 2026-09-03**, which is a different claim from S1's: a
+different `restic` build (0.18.1 on linux/arm64), a much older packaged `rclone`
+(v1.60.1-DEV against 1.75.0 on the host), and a machine whose only route out is QEMU's
+user-mode NAT. All eight steps pass there too, including a root-privileged backup, a restore
+and a `prune`. The older rclone handling the gateway matters: the design does not depend on
+a recent build.
 
 **Two things the spike also established.** `rclone` becomes a **dependency of the backup
 path** and must be in the install script (§3), which it was not. And the `prune` step

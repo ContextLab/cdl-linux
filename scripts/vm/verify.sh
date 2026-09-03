@@ -19,6 +19,22 @@ SSH_OPTS=(-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
 # shellcheck disable=SC2029
 sshv() { ssh "${SSH_OPTS[@]}" "${VM_USER}@127.0.0.1" "$@"; }
 
+# Checks that need root. The guest user is an ordinary sudoer, so sudo wants a password;
+# passing it on stdin keeps the machine under test unmodified, where granting passwordless
+# sudo to make the tests easier would change the thing being tested.
+sudov() { sshv "echo '$VM_PASSWORD' | sudo -S -p '' $*" 2>/dev/null; }
+
+# Pattern-based `check` compares output. Some assertions are better expressed as "this
+# command, run as root, finds this" -- so check_root takes an exit status instead.
+check_root() {
+    local what="$1" sect="$2" cmd="$3" pattern="$4"
+    if sudov "$cmd" 2>/dev/null | grep -qE "$pattern"; then
+        printf '  \033[32mPASS\033[0m  %-46s (%s)\n' "$what" "$sect"; pass=$((pass+1))
+    else
+        printf '  \033[31mFAIL\033[0m  %-46s (%s)\n' "$what" "$sect"; fail=$((fail+1))
+    fi
+}
+
 pass=0; fail=0
 check() {
     local what="$1" sect="$2" expect="$3"; shift 3
@@ -40,7 +56,7 @@ printf '\n\033[1m-- storage layout (§2.1) --\033[0m\n'
 check "md0 exists and is raid0"        "§2.1" "raid0"        "cat /proc/mdstat"
 check "md0 has two members"            "§2.1" "vd[ab][0-9].*vd[ab][0-9]" "cat /proc/mdstat"
 check "LUKS is open on md0"            "§2.1" "cryptroot"    "ls /dev/mapper/"
-check "the LUKS backing device is md0" "§2.1" "md0"          "sudo cryptsetup status cryptroot | grep device:"
+check_root "the LUKS backing device is md0" "§2.1" "cryptsetup status cryptroot" "md0"
 check "root is btrfs"                  "§2.1" "btrfs"        "findmnt -no FSTYPE /"
 check "root sits on the mapped device" "§2.1" "cryptroot"    "findmnt -no SOURCE /"
 
@@ -57,8 +73,8 @@ check "/boot is outside the encryption" "§2.1" "ext4"        "findmnt -no FSTYP
 check "crypttab references md0"        "§2.1" "."            "grep -c . /etc/crypttab"
 
 printf '\n\033[1m-- boot survivability (§12 B1) --\033[0m\n'
-check "initramfs carries cryptsetup"   "§12"  "[1-9]"        "lsinitramfs /boot/initrd.img-\$(uname -r) 2>/dev/null | grep -c cryptsetup"
-check "initramfs carries md support"   "§12"  "[1-9]"        "lsinitramfs /boot/initrd.img-\$(uname -r) 2>/dev/null | grep -c 'md[a-z]*\\.ko\\|mdadm'"
+check_root "initramfs carries cryptsetup" "§12" "lsinitramfs /boot/initrd.img-\$(uname -r)" "cryptsetup"
+check_root "initramfs carries md support" "§12" "lsinitramfs /boot/initrd.img-\$(uname -r)" "mdadm|md[a-z_]*\.ko"
 check "this boot came off the array"   "§12"  "cryptroot"    "findmnt -no SOURCE /"
 
 printf '\n\033[1m-- backup path (§10) --\033[0m\n'
@@ -66,7 +82,7 @@ check "restic present"                 "§10"  "restic"       "restic version"
 check "rclone present"                 "§10.5" "rclone"      "rclone version | head -1"
 
 printf '\n\033[1m-- headless posture (§1.1) --\033[0m\n'
-check "no display server installed"    "§1.1" "^0$"          "dpkg -l 2>/dev/null | grep -cE '^ii +(xserver-xorg|gnome-shell|sway) ' || echo 0"
+check "no display server installed"    "§1.3" "^0$"          "dpkg -l 2>/dev/null | grep -cE '^ii +(xserver-xorg|gnome-shell|sway) '"
 check "sshd is running"                "§7"   "active"       "systemctl is-active ssh"
 
 printf '\n\033[1m== %d passed, %d failed ==\033[0m\n' "$pass" "$fail"

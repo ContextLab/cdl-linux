@@ -7,7 +7,7 @@ Status key: `[ ]` not started · `[~]` in progress · `[x]` done · `[!]` blocke
 
 ## Now
 
-- [~] **V1. Run the VM install end to end** (`scripts/vm/install.sh`). Settles whether the
+- [x] **V1. VM install: DONE 2026-09-03.** (`scripts/vm/install.sh`). Settles whether the
   autoinstall's `early-commands` path works: md → LUKS → btrfs with three subvolumes, handed
   to curtin as `preserve: true`. Curtin's handling of a pre-built stack is the risky part.
   - Attempt 1 failed at `hdiutil attach`: macOS cannot mount an Ubuntu hybrid ISO at all
@@ -40,13 +40,20 @@ Status key: `[ ]` not started · `[~]` in progress · `[x]` done · `[!]` blocke
     rebooting, and the EFI vars file is recreated fresh.
   - Attempt 5 (clean): 0 errors, POWEROFF fired, disks 4.1G/3.9G. **Booting now, and the
     installed kernel is starting**, so the EFI problem is resolved.
-- [ ] **V2. Boot it and answer the LUKS prompt.** `scripts/vm/boot.py`. Tests the unlock
-  path the real machine will use.
-- [ ] **V3. Run the verifier.** `scripts/vm/verify.sh`. It now asserts `@`, `@home`,
-  `@models` and will FAIL until the layout is right, which is the point.
-- [ ] **B1. Test the backup path on the VM.** `restic` → `rclone` → HF bucket, from inside
-  the guest rather than from the Mac. Then restore and diff. S1 proved the transport from
-  macOS; this proves it from the machine that will actually run it.
+- [x] **V2. Boot + LUKS unlock: PASS.** The prompt appeared on the serial console, `boot.py`
+  answered it, and SSH came up. md → LUKS → btrfs → systemd → sshd all work.
+- [x] **V3. Verifier: 15 passed, 6 failed**, and all six failures are the subvolume
+  assertions. `/` is mounted from `subvolid=5`. **curtin does not create btrfs subvolumes
+  from an autoinstall storage config** -- the definitive §2.1.2 answer. Three checks of mine
+  were also broken and are fixed: two needed root (sudo with the password on stdin), and one
+  had the `grep -c ... || echo 0` double-zero bug **for the second time this session**.
+- [x] **B1. Guest backup test: 8 passed, 0 failed.** restic 0.18.1 on linux/arm64 with the
+  packaged rclone v1.60.1-DEV (much older than the host's 1.75.0) reaches the HF gateway
+  through QEMU user-mode NAT. Init, backup as root, `check --read-data`, restore, diff,
+  forget+prune, check all pass. One earlier failure was my test running the backup
+  unprivileged: restic exits 3 when it cannot read `/etc/shadow`, and the snapshot was fine.
+- [ ] **V4. Implement and test the `@` migration in the VM** (§2.1.2's chosen option), before
+  it ever runs on the Tensorbook.
 - [ ] **B2. Test the second copy.** §10.2's `rclone copy` pull from a different machine,
   since that is the only thing standing between a compromised token and total loss.
 
@@ -97,7 +104,9 @@ Source: `notes/reviews/2026-09-02-cdl-box-deep-audit.md`
   in one file feeding kmscon, `setvtrgb`, shell/tool themes and the dashboard CSS, with
   contrast checked in the suite. Logo centred in Plymouth. Font is `fonts-firacode` plus
   Symbols Nerd Font fallback, since the patched Nerd build is not packaged.
-- [ ] **A13. Regenerate the whitepaper + PDF** from the corrected spec. Its central argument
+- [~] **A13. Whitepaper rewritten** for console-first, the install-script model, kmscon and
+  the measured findings. PDF still to render.
+- [ ] **A13b. Render the PDF** from the corrected spec. Its central argument
   (headless, not a distribution, SSH-primary) is now partly obsolete.
 
 ## Done this session

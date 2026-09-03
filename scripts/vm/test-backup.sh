@@ -46,7 +46,7 @@ sshv 'command -v restic && command -v rclone' >/dev/null 2>&1 \
 # The whole test runs as one remote script so credentials cross once, live in a
 # tmpfs-backed file the script removes, and never touch the guest's persistent disk.
 log "running the backup round trip inside the VM"
-sshv "AWS_KEY='$K' AWS_SECRET='$V' NS='$NS' BUCKET='$BUCKET' bash -s" <<'REMOTE'
+sshv "AWS_KEY='$K' AWS_SECRET='$V' NS='$NS' BUCKET='$BUCKET' VMPW='$VM_PASSWORD' bash -s" <<'REMOTE'
 set -uo pipefail
 pass=0; fail=0
 step() {
@@ -82,7 +82,17 @@ echo "guest: $(rclone version | head -1)"
 
 step "rclone reaches the gateway"  rclone lsd hf:
 step "restic init"                 restic init
-step "backup /etc"                 restic backup /etc --tag vm
+
+# Run the backup as root, which is what the real timer does. As an ordinary user restic
+# cannot read /etc/shadow and friends, exits 3 ("completed with warnings"), and the test
+# reports a failure for a snapshot that in fact saved correctly. Fixing the privilege is
+# more faithful than teaching the test to accept the warning.
+backup_as_root() {
+    echo "$VMPW" | sudo -S -p '' \
+        --preserve-env=RESTIC_PASSWORD,RESTIC_REPOSITORY,RCLONE_CONFIG \
+        restic backup /etc --tag vm
+}
+step "backup /etc (as root)" backup_as_root
 step "check --read-data"           restic check --read-data
 rm -rf /tmp/restored
 step "restore"                     restic restore latest --target /tmp/restored
