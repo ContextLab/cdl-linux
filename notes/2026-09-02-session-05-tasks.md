@@ -51,12 +51,18 @@ Source: `notes/reviews/2026-09-02-cdl-box-deep-audit.md`
   rotated on §11.1's schedule, zellij resurrection disabled.
 - [x] **A6. GPU thermal policy** added alongside the CPU one: power cap via `nvidia-smi -pl`,
   admission refusal at 87 °C, and never killing a running job on temperature.
-- [ ] **A7. Backup second copy operational detail**: retention, capacity, encryption,
-  alerting, ownership, restore-test cadence.
-- [ ] **A8. Rollback**: `/boot` and root-subvolume consistency across kernel changes.
-- [ ] **A9. Network behaviour** before Tailscale enrolment, and during failure or
-  reauthentication. Tailnet reachability is not authorisation to read prompts or dashboard
-  data.
+- [x] **A7. Backup second copy operations** in §10.2: where, daily, 30 pulls retained,
+  capacity checked, already encrypted (it is a restic repo), alerting, one named owner, and
+  a quarterly restore **from the second copy** since that is the one nobody exercises.
+- [x] **A8. Rollback consistency.** §11.4: `/boot` is a separate ext4 partition and is in no
+  btrfs snapshot, so rolling `@` back past a kernel upgrade restores old `/lib/modules`
+  against a new `/boot` -- no md, no dm-crypt, no root. `/boot` is now archived into each
+  snapshot and restored with it. New test B7a exercises it across a kernel change.
+- [x] **A9. Network states** in §7.1: before enrolment (sshd also on LAN, console does the
+  enrolment), during failure (LAN works, tailnet does not, and `logged out` looks identical
+  to `down` from elsewhere), key expiry disabled for this node. §7.2 states that tailnet
+  reachability is not authorisation: the dashboard checks `tailscale whois`, the model
+  endpoint cannot, so sharing the tailnet shares the endpoint.
 - [x] **A10. Verified-boot claim narrowed.** New §2.1.1: signed kernel and modules, *not*
   verified boot, because the initrd is unvalidated and `/boot` is unencrypted by necessity.
 - [x] **A11. Model capacity** given as a table of workloads against 16 GB, marked as

@@ -419,7 +419,43 @@ less predictably.
 - **The model endpoint is served on the tailnet**, so other devices use this machine's GPU
   by pointing at one URL. It binds to the tailnet interface, never `0.0.0.0`.
 
-### 7.1 A reboot takes the machine offline until someone visits it
+### 7.1 What the network does when Tailscale is not working
+
+Three states the design has to survive, because two of them are how a machine becomes
+unreachable for a day.
+
+**Before enrolment.** A freshly installed machine has no tailnet. `sshd` therefore also
+listens on the LAN, so the first connection can happen without Tailscale, and enrolment is
+one of the first things §9.1's console home screen offers. The console is what makes this
+recoverable rather than a chicken-and-egg problem.
+
+**During failure or re-authentication.** Tailscale keys expire and nodes get logged out.
+When that happens the tailnet address stops working while the LAN address keeps working, so
+the machine is reachable to anyone on the same network and unreachable from outside it.
+`cdl status` and the console report tailnet state explicitly, because "Tailscale is logged
+out" and "the machine is down" look identical from a laptop elsewhere.
+
+**Key expiry is disabled for this node.** It is a server, and a server that logs itself out
+on a timer while nobody is in the building is a machine that needs a car journey.
+
+### 7.2 Being on the tailnet is not authorisation
+
+The model endpoint and the dashboard bind to the tailnet, and draft 2 treated that as the
+whole access control. It is not. **Every device on the tailnet, and every device
+someone else shares into it, can reach both** — which means it can read prompts, model
+output, and everything §8.1 displays.
+
+For a single-person tailnet that is close enough to fine, and it is stated so the assumption
+is visible rather than implied. Two things follow:
+
+- **The dashboard checks identity**, not just reachability: it resolves the caller with
+  `tailscale whois` and refuses anyone who is not the owner (§8.3).
+- **The model endpoint does not**, because Ollama has no per-caller authentication and
+  putting a proxy in front of it is work with no payoff on a one-person tailnet. **If the
+  tailnet is ever shared, that endpoint is shared with it.** That is the trigger to revisit
+  this, and it is written down so the trigger is recognisable.
+
+### 7.3 A reboot takes the machine offline until someone visits it
 
 There is no remote LUKS unlock (§2.1), and with the machine in an office rather than at
 hand, that is the sharpest trade in this design. **A reboot from any cause parks at the
@@ -636,6 +672,20 @@ advisory given RAID0:
 Fine-grained HF tokens can be scoped to a single bucket, which limits blast radius without
 preventing deletion inside that scope. Use one; it is free and it bounds the damage.
 
+**The second copy needs operations, not just a principle.** Draft 2 described the idea and
+nothing else, which is how a safeguard ends up existing on paper only:
+
+| Question | Answer |
+|-|-|
+| Where | A machine that is not this one and holds no credential this one can read. A laptop is fine; the point is the trust boundary, not the hardware |
+| How often | Daily. That sets the window in which a wipe can go unnoticed, and it is the number to argue about if any is |
+| Retention | Keep 30 daily pulls. `rclone copy` never deletes at the destination, so "retention" here means pruning the second copy deliberately, from that machine, never from the box |
+| Capacity | The repository is `/home` and `/etc` with caches excluded, so tens of GB. Check before assuming a laptop has room; a second copy that silently stops for want of space is worse than none, because it is believed in |
+| Encryption | Already encrypted: it is a `restic` repository, and the second copy is a byte copy of it. The passphrase lives with the person, not on either machine |
+| Alerting | The pulling machine reports success or failure somewhere a human sees it. A backup nobody is watching fails silently by construction |
+| Ownership | One named person. "The system does it" is how a copy stops running and nobody notices |
+| Restore test | Quarterly, from the **second copy** rather than the bucket, because that is the copy nobody exercises and therefore the one most likely to be broken |
+
 ### 10.3 What is backed up
 
 - `/home` and `/etc`, with `--exclude-caches` so `CACHEDIR.TAG` directories drop out. The
@@ -740,10 +790,26 @@ enough.
 
 ### 11.4 Rollback
 
-btrfs snapshots of `@` are taken before the provisioning script runs and before a manual
-apt upgrade, retained for 30 days. Rolling back is a boot-time subvolume swap. **This is not
-a substitute for backup** (§10): the snapshots live on the same striped array that a drive
+btrfs snapshots of `@` are taken before the install script runs and before a manual apt
+upgrade, retained for 30 days. Rolling back is a boot-time subvolume swap. **This is not a
+substitute for backup** (§10): the snapshots live on the same striped array that a drive
 failure destroys.
+
+**A snapshot of `@` alone is inconsistent across a kernel change, and that has to be handled
+rather than discovered.** `/boot` is a separate ext4 partition (§2.1) and is not part of any
+btrfs snapshot. So rolling `@` back to before a kernel upgrade restores the old
+`/lib/modules` while `/boot` still holds only the new kernel: the machine boots a kernel
+whose modules are gone, which on this design means no `md`, no `dm-crypt`, and no root.
+
+The rule that avoids it: **`/boot` is archived into the snapshot at the moment the snapshot
+is taken**, as a tarball under `@snapshots/<id>/boot.tar`, and a rollback restores both. It
+costs a few hundred megabytes per snapshot and removes the failure entirely.
+
+Two consequences worth stating. Ubuntu keeps several kernels in `/boot` already, so the
+common case survives a rollback without this; the case that does not is a rollback after
+`apt autoremove` has pruned the old kernel. And a rollback is therefore **not** a pure
+subvolume swap, so §12's B-series should exercise one across a kernel change specifically,
+rather than a rollback in general.
 
 ## 12. Build order
 
@@ -774,7 +840,8 @@ A runbook that has been executed twice is the artifact; prose describing the lay
 | **S3** | **Can one stored copy serve both servers?** (§5.2) | Hand an Ollama blob to `llama-server` for the exact quantisation in use. Pass means one copy; fail means storage is doubled and the spec says so |
 | **B5** | `llama-swap`, and the GPU lock | Codex talks to `llama-server` over Responses on `8081`. Then `cdl-gpu train` names the services it will stop, stops them, holds the GPU, and **restarts them when the run exits** -- including when the run is `SIGKILL`ed, which is the case a shell trap would miss |
 | **B6** | Agent CLIs, `zellij`, session logging | All four launch, authenticate and run a trivial task. Claude Code's phone steering still works, which is what §4.1 protects. Kill a session and confirm its `script(1)` log survives with the transcript intact |
-| **B7** | Backup, on the new machine | Restore `/home` to a scratch directory and diff it. Confirm the second copy (§10.2) is still pulling |
+| **B7** | Backup, on the new machine | Restore `/home` to a scratch directory and diff it. Confirm the second copy (§10.2) is still pulling, and run one restore **from the second copy** rather than from the bucket |
+| **B7a** | Rollback across a kernel change | Snapshot, upgrade the kernel, `apt autoremove` the old one, then roll back. The machine must boot: `/lib/modules` and `/boot` have to agree, which is what §11.4's `/boot` archive exists for and what a plain subvolume swap fails |
 | **B8** | Read-only dashboard | Panels in §8.1 match the machine's real state, checked from a phone. No write actions exist |
 | **B9** | Provisioning reproduces the machine | The script runs clean on a fresh VM, then runs again and changes nothing. Together with S2's runbook, this is the whole reproducibility claim |
 
