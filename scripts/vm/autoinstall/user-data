@@ -81,6 +81,11 @@ autoinstall:
     - rclone
     - openssh-server
 
+  # Power off rather than reboot. install.sh boots the ISO's kernel directly with -kernel,
+  # so a reboot re-enters the installer and it reinstalls in a loop -- observed 46 times
+  # before it was noticed. Powering off ends the run cleanly and boot.py takes it from there.
+  shutdown: poweroff
+
   late-commands:
     # Serial console on the installed system, so a reboot can be driven and observed
     # without a display. Matches the headless design.

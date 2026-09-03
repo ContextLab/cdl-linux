@@ -634,7 +634,86 @@ The part that decides whether this is pleasant to use daily.
 Theming for the shell side is configured on the box, and the client terminal's own
 configuration (fonts, window) stays on the client, where it belongs.
 
-### 9.6 Branding, stage by stage
+### 9.6 Fira Code with ligatures, on the local console
+
+**This is a requirement, not a preference.** The original brainstorming recorded it as D3:
+*"macOS keybindings and font quality are HIGH priority, not cosmetic"*, and it named the font
+specifically. It also recorded the tension it creates, as T1: *"'no GUI' vs 'Fira Code WITH
+ligatures' — Linux VT uses bitmap PSF fonts, no shaping engine."*
+
+That tension is real and worth restating, because it is a difference in rendering model
+rather than a missing feature. The kernel's virtual terminal draws 1-bit PSF bitmaps from a
+512-glyph table and has no text-shaping engine at all. **A ligature is a HarfBuzz `GSUB`
+substitution**, so no console font, however well made, can produce one. Converting Fira Code
+to PSF gives its letterforms and none of its ligatures.
+
+The archived design resolved this with a fullscreen `kitty` under a Wayland compositor.
+**The console-first decision silently dropped that, and with it a high-priority
+requirement** — which is the kind of thing that happens when a simplification is judged only
+against the things it obviously removes.
+
+#### The answer: `kmscon` on tty1
+
+`kmscon` is a KMS/DRM console emulator that runs in userspace and replaces the kernel VT. It
+renders through freetype or pango rather than a bitmap table, so it does TrueType rasterising
+**and shaping**, which is what ligatures need. It is actively maintained (10.0.0, May 2026)
+and **is in the Ubuntu archive**, so this costs an `apt install` rather than a compositor.
+
+What that buys, and what it does not: it gives real fonts and ligatures on the machine's own
+screen without X, without Wayland, without a compositor, and therefore without the
+session-lock problem that made the archived design's answer expensive. It is not a graphical
+environment and nothing about it reintroduces one.
+
+| Terminal | Font | Ligatures |
+|-|-|-|
+| **tty1** — `kmscon` | Fira Code, via freetype | **Yes** |
+| **tty2** — kernel VT (§9.2) | Fira Code converted to PSF | No, and that is fine: it is the recovery path |
+| **Over SSH** | Whatever the client uses | The client's business, not the box's |
+
+**tty2 staying a kernel VT is deliberate.** `kmscon` is another thing that can fail, and the
+recovery terminal must not depend on it. If `kmscon` does not start, tty1 falls back to the
+kernel VT and the machine is still usable, just less pretty.
+
+#### The font, and why it is two fonts
+
+**`fonts-firacode` from the Ubuntu archive, plus Symbols Nerd Font as a fallback.** The
+original notes settled this and the reasoning still holds: `croft` renders file and
+activity-bar icons as Nerd Font glyphs, which plain Fira Code does not carry. The patched
+Fira Code Nerd Font build is **not** in the Ubuntu archive, so rather than vendor a patched
+font we use the packaged original and let fontconfig fall back to the symbols-only font for
+the glyph ranges it lacks. That keeps the licensing simple (both are SIL OFL, so a public
+repo can carry the configuration without carrying the fonts) and keeps Fira Code updatable
+through `apt`.
+
+### 9.7 The CDL palette, and the logo
+
+**One palette, defined once, applied everywhere it can be.** Sixteen ANSI colours plus a
+foreground and background, living in `/etc/cdl/palette.conf`, and consumed by:
+
+| Surface | Mechanism |
+|-|-|
+| `kmscon` on tty1 | its own `palette` configuration |
+| The kernel VT fallback | `setvtrgb`, from the same source file |
+| Shell prompt, `bat`, `eza`, `delta`, `zellij`, Emacs | generated theme files, from the same source file |
+| The dashboard (§8) | CSS variables, from the same source file |
+
+Generating them from one file is the point. A palette maintained in six places is a palette
+that is subtly different in six places.
+
+**Contrast is checked rather than assumed.** The archived design found that its own ANSI
+black sat at 1.24:1 against the background while the document claimed every colour cleared
+4.5:1, which is the sort of error that survives because nobody measures a colour scheme.
+Every foreground colour is checked against the background it is actually drawn on, and the
+check runs in the test suite rather than living in someone's memory.
+
+**The logo, centred, at boot.** Plymouth draws it (§9.8), centred on the panel, with the LUKS
+passphrase prompt beneath it. GRUB carries a smaller version in its menu. Both are artwork
+and configuration, never a signed executable, and both keep their escapes: Plymouth's Escape
+still reveals the boot log, and GRUB still shows its recovery entry.
+
+The logo itself does not exist yet, and is open item 7.
+
+### 9.8 Branding, stage by stage
 
 "A branded boot" is not one thing. It is six, each with a different mechanism and a
 different failure mode, and the point of listing them is that skipping any one leaves an
@@ -645,7 +724,7 @@ obviously stock screen in the middle of an otherwise finished sequence.
 | Firmware / OEM splash | Nothing. It is not ours | Outside our control on this hardware |
 | shim, MokManager | **Nothing** | These are Canonical's signed binaries. Replacing one breaks Secure Boot; see below |
 | GRUB | Menu title, colours, background, and a visible **Recovery** entry | GRUB's own documentation warns that early graphical modes can fail on some hardware, so the theme degrades to a plain text menu rather than to a blank screen |
-| Plymouth | Splash plus the LUKS passphrase prompt | Needs a working text fallback, and **Escape must reveal the boot log**. A branded splash that hides a failure is worse than no splash |
+| Plymouth | **The CDL logo, centred**, plus the LUKS passphrase prompt beneath it (§9.7) | Needs a working text fallback, and **Escape must reveal the boot log**. A branded splash that hides a failure is worse than no splash |
 | getty / login | `/etc/issue`, showing hostname, tailnet name and a one-line hint | Plain text, and it is the first thing a person at the machine reads |
 | After login | The `cdl` home screen (§9.1) | |
 | Shell, dashboard, docs | One palette, used consistently (§9.5) | |
