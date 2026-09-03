@@ -18,10 +18,20 @@ Status key: `[ ]` not started · `[~]` in progress · `[x]` done · `[!]` blocke
     *install ISO* (no `user-data` on it) and so stopped it discovering the CIDATA-labelled
     seed volume that has one. Fixed by passing `autoinstall` alone and letting NoCloud find
     the seed by label.
-  - Attempt 3: **`early-commands` ran the whole storage stack** -- `mdadm --create`,
+  - Attempt 3: `early-commands` ran the whole storage stack -- `mdadm --create`,
     `cryptsetup luksFormat`, `cryptsetup open`, `mkfs.btrfs`, and all three subvolumes
-    (`@`, `@home`, `@models`). Subiquity applied the autoinstall config through every stage.
-    Waiting on completion.
+    (`@`, `@home`, `@models`), and subiquity applied the config through every stage --
+    then **curtin crashed**: `'NoneType' object has no attribute 'size'`. Handing curtin a
+    pre-built stack via `preserve: true` does not work.
+  - **Second obstacle, from Canonical's own docs**: subiquity silently drops
+    `storage:config:mount:options`, which is the field a `subvol=/@` mount needs. So even a
+    working `preserve` path would have mounted the top level, silently.
+  - Attempt 4 (running): let curtin build the stack the way it supports, and ask whether it
+    creates subvolumes on its own. Ubuntu's guided btrfs installs use `@`/`@home`, so the
+    capability exists; whether autoinstall reaches it is the question.
+  - **Recorded in the spec as §2.1.2** with four options and none chosen, because the
+    measurement is not finished. This is the spike doing its job: the layout cannot be
+    assumed, and draft 2 wrote it down as though declaring it made it so.
 - [ ] **V2. Boot it and answer the LUKS prompt.** `scripts/vm/boot.py`. Tests the unlock
   path the real machine will use.
 - [ ] **V3. Run the verifier.** `scripts/vm/verify.sh`. It now asserts `@`, `@home`,

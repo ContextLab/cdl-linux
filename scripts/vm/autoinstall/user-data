@@ -39,68 +39,38 @@ autoinstall:
     install-server: true
     allow-pw: true
 
-  # Curtin cannot express btrfs subvolumes in its storage config, and the spec's layout
-  # needs three of them (@ for root, @home, @models). So the stack is built here, before
-  # curtin runs, and curtin is then handed the finished filesystem with preserve: true.
+  # ATTEMPT 4. Attempt 3 built the stack in early-commands and handed curtin
+  # `preserve: true`; curtin crashed with "'NoneType' object has no attribute 'size'".
+  # Separately, subiquity is documented to silently drop storage:config:mount:options, so
+  # the `subvol=` mounts would have been ignored even had curtin survived.
   #
-  # UNVERIFIED as of 2026-09-02. This is exactly what spike S2 exists to settle, and the
-  # verifier now fails until the three subvolumes are present, rather than passing on the
-  # flat btrfs root that draft 1 of this harness produced.
-  early-commands:
-    - |
-      set -eux
-      # Partition disk0: ESP, /boot, raid member. disk1: one matching raid member.
-      sgdisk --zap-all /dev/vda
-      sgdisk --zap-all /dev/vdb
-      sgdisk -n1:0:+512M -t1:ef00 -c1:esp  /dev/vda
-      sgdisk -n2:0:+2G   -t2:8300 -c2:boot /dev/vda
-      sgdisk -n3:0:+20G  -t3:fd00 -c3:raid /dev/vda
-      sgdisk -n1:0:+20G  -t1:fd00 -c1:raid /dev/vdb
-      partprobe /dev/vda; partprobe /dev/vdb; udevadm settle
-
-      # RAID0 across the two equal members.
-      mdadm --create /dev/md0 --level=0 --raid-devices=2 --metadata=1.2 --run /dev/vda3 /dev/vdb1
-      udevadm settle
-
-      # LUKS. The passphrase is a test credential and is meant to be public.
-      printf '%s' 'cdl-vm-test-passphrase' | cryptsetup luksFormat --type luks2 --batch-mode /dev/md0 -
-      printf '%s' 'cdl-vm-test-passphrase' | cryptsetup open /dev/md0 cryptroot -
-
-      # btrfs, then the three subvolumes the spec asks for.
-      mkfs.btrfs -f -L cdlroot /dev/mapper/cryptroot
-      mount /dev/mapper/cryptroot /mnt
-      btrfs subvolume create /mnt/@
-      btrfs subvolume create /mnt/@home
-      btrfs subvolume create /mnt/@models
-      umount /mnt
-
-      mkfs.ext4 -F -L cdlboot /dev/vda2
-      mkfs.vfat -F32 -n ESP /dev/vda1
-
+  # So this attempt lets curtin build the stack the way it supports, and asks one question:
+  # does curtin create btrfs subvolumes on its own? Ubuntu's guided btrfs installs use @ and
+  # @home, so the capability exists somewhere; what is unknown is whether an autoinstall
+  # storage config reaches it. The verifier answers that, and it fails if the answer is no.
   storage:
     config:
-      # Everything below is preserve: true -- early-commands already built it. curtin's job
-      # here is to mount the right subvolumes and install into them, not to create anything.
-      - {type: disk, id: disk0, path: /dev/vda, ptable: gpt, preserve: true, grub_device: true}
-      - {type: disk, id: disk1, path: /dev/vdb, ptable: gpt, preserve: true}
+      - {type: disk, id: disk0, path: /dev/vda, ptable: gpt, wipe: superblock-recursive, preserve: false, grub_device: false}
+      - {type: disk, id: disk1, path: /dev/vdb, ptable: gpt, wipe: superblock-recursive, preserve: false}
 
-      - {type: partition, id: p_esp,  device: disk0, number: 1, size: 512M, flag: boot, preserve: true, grub_device: true}
-      - {type: partition, id: p_boot, device: disk0, number: 2, size: 2G,   preserve: true}
-      - {type: partition, id: p_r0,   device: disk0, number: 3, size: 20G,  preserve: true}
-      - {type: partition, id: p_r1,   device: disk1, number: 1, size: 20G,  preserve: true}
+      - {type: partition, id: p_esp, device: disk0, size: 512M, flag: boot, grub_device: true}
+      - {type: format, id: f_esp, volume: p_esp, fstype: fat32}
+      - {type: mount, id: m_esp, device: f_esp, path: /boot/efi}
 
-      - {type: raid, id: md0, name: md0, raidlevel: raid0, devices: [p_r0, p_r1], preserve: true}
-      - {type: dm_crypt, id: crypt0, volume: md0, dm_name: cryptroot, key: cdl-vm-test-passphrase, preserve: true}
+      # /boot stays outside the encryption: GRUB has to read a kernel before anything can
+      # be unlocked.
+      - {type: partition, id: p_boot, device: disk0, size: 2G}
+      - {type: format, id: f_boot, volume: p_boot, fstype: ext4}
+      - {type: mount, id: m_boot, device: f_boot, path: /boot}
 
-      - {type: format, id: f_root, volume: crypt0, fstype: btrfs, preserve: true}
-      - {type: format, id: f_boot, volume: p_boot, fstype: ext4,  preserve: true}
-      - {type: format, id: f_esp,  volume: p_esp,  fstype: fat32, preserve: true}
+      - {type: partition, id: p_raid0, device: disk0, size: 20G}
+      - {type: partition, id: p_raid1, device: disk1, size: 20G}
 
-      - {type: mount, id: m_root,   device: f_root, path: /,           options: 'subvol=/@'}
-      - {type: mount, id: m_home,   device: f_root, path: /home,       options: 'subvol=/@home'}
-      - {type: mount, id: m_models, device: f_root, path: /srv/models, options: 'subvol=/@models'}
-      - {type: mount, id: m_boot,   device: f_boot, path: /boot}
-      - {type: mount, id: m_esp,    device: f_esp,  path: /boot/efi}
+      - {type: raid, id: md0, name: md0, raidlevel: raid0, devices: [p_raid0, p_raid1]}
+      - {type: dm_crypt, id: crypt0, volume: md0, dm_name: cryptroot, key: cdl-vm-test-passphrase}
+
+      - {type: format, id: f_root, volume: crypt0, fstype: btrfs}
+      - {type: mount, id: m_root, device: f_root, path: /}
 
   packages:
     - mdadm
@@ -126,3 +96,5 @@ autoinstall:
     - curtin in-target -- sh -c 'cat /etc/fstab > /var/log/cdl/fstab.txt 2>&1 || true'
     - curtin in-target -- sh -c 'cat /proc/mdstat > /var/log/cdl/mdstat.txt 2>&1 || true'
     - curtin in-target -- sh -c 'lsinitramfs /boot/initrd.img-$(ls /lib/modules | head -1) 2>/dev/null | grep -cE "cryptsetup|md" > /var/log/cdl/initramfs-bits.txt 2>&1 || true'
+    # The question this run exists to answer.
+    - curtin in-target -- sh -c 'btrfs subvolume list / > /var/log/cdl/subvolumes.txt 2>&1 || echo NONE > /var/log/cdl/subvolumes.txt'

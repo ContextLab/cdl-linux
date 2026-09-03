@@ -116,6 +116,35 @@ more heavily used one. Two consequences follow and both are requirements rather 
   here rather than in a footnote, and building the second copy is the cheapest thing that
   closes it.
 
+### 2.1.2 The subvolumes may not be reachable from the stock installer
+
+**Open, and being settled by spike S2 (§12) as this is written.** The layout above wants
+three btrfs subvolumes with root installed into `@`. Two obstacles have been measured, and
+neither was anticipated:
+
+1. **Building the stack beforehand and handing curtin `preserve: true` crashes it.** VM
+   attempt 3 created the md, LUKS, btrfs and all three subvolumes successfully in
+   `early-commands`, and curtin then failed the install step with
+   `'NoneType' object has no attribute 'size'`.
+2. **Subiquity is documented to silently drop `storage:config:mount:options`.** That is the
+   field a `subvol=/@` mount would use, so even a working `preserve` path would have mounted
+   the top-level subvolume rather than `@`, and would have done it without an error.
+
+If the stock installer cannot produce this layout, the options are, in the order we would
+consider them:
+
+| Option | Cost |
+|-|-|
+| **Root not in a subvolume**, with `@home` and `@models` created afterwards | Loses §11.4's rollback, which needs a snapshot of root. That is the reason `@` is here at all |
+| **Migrate to `@` from `install.sh`**: create it, move the filesystem into it, rewrite `fstab` and GRUB, reboot once | Coherent with the one-script model, but moving a live root filesystem is the kind of operation that works until it does not |
+| **Drop btrfs for root** and use ext4, keeping btrfs only for `/srv/models` | Simplest, and loses snapshots on the thing snapshots were for |
+| **Abandon the stock installer** for storage | Contradicts §1.2 and is most of what a custom ISO was going to cost |
+
+**No option is chosen yet, because the measurement is not finished.** What is already
+settled is that the layout cannot be assumed: draft 2 wrote it down as though declaring it
+made it so, and the harness that was supposed to check it passed a filesystem with no
+subvolumes at all.
+
 **A considered alternative, rejected for a practical reason.** Two LUKS devices with btrfs
 spanning both (`-d raid0 -m raid1`) would stripe data while mirroring metadata, so a
 single-device failure would leave a mountable filesystem that can at least enumerate what
@@ -822,7 +851,7 @@ is labelled as one. **Two spikes and one preflight come before anything destruct
 |-|-|-|
 | ~~**S1**~~ | ~~Does `restic` work against the HF S3 gateway?~~ | ✅ **Done 2026-09-02, and it changed the design** (§10.5). Direct S3 cannot `init`; `restic` over `rclone` passes all seven steps including restore-and-diff and `prune`. `rclone` is now a dependency |
 | **B0** | **Back up the machine that exists today, and prove the backup is real** | The Tensorbook currently holds work. Before repartitioning: back up `/home` and `/etc` to the bucket, restore to scratch storage on a *different* machine, and diff. Then set up the §10.2 second copy and confirm it pulls. **Record explicitly that T5 is open** (a write-capable token on the box can erase the bucket) and that RAID0 is being accepted on those terms |
-| **S2** | **Rehearse the storage install in a disposable VM** | Two full installs from a written runbook, the second reproducing the first exactly. The runbook records partitioning and EFI layout, `mdadm` assembly during early boot, LUKS creation and unlock, btrfs subvolume creation and mount options, `/etc/crypttab`, `/etc/fstab`, initramfs contents, and behaviour when one array member is absent |
+| **S2** | **Rehearse the storage install in a disposable VM** | Two full installs from `scripts/vm/autoinstall/user-data`, the second reproducing the first. Records partitioning and EFI layout, `mdadm` assembly during early boot, LUKS creation and unlock, subvolume creation, `/etc/crypttab`, `/etc/fstab`, initramfs contents, and behaviour when one array member is absent. **In progress; it has already found that the layout in §2.1 may not be expressible in a stock autoinstall (§2.1.2), which is the kind of thing this spike exists to find before a disk is touched** |
 
 **S2 exists because the provisioning script starts after installation**, so the most
 consequential part of the machine, the storage layout, is currently reproduced by nothing.
