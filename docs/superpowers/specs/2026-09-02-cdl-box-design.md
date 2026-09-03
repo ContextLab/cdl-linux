@@ -259,6 +259,8 @@ The stack, installed by `20-nvidia.sh` and `40-ml.sh`:
 - PyTorch with CUDA, `transformers`, `datasets`, `peft`, `accelerate`, `bitsandbytes`.
 - **`uv` for every environment**, so packages hardlink from one shared cache instead of
   being copied per project.
+- **`rclone`**, which is a hard dependency of the backup path rather than a convenience
+  (§10.5): `restic` cannot reach an HF bucket without it.
 - **`hf-mount` for read-only access to Hub repos**, which is where mounting genuinely fits:
   its README names *"Loading models and datasets without downloading the full repo"* and
   *"Environments where disk space is limited"* as what it is best for. A large evaluation
@@ -395,16 +397,29 @@ the Hub's own documentation states this use case: *"Buckets are well-suited for 
 rolling backups."* Unlike a Git-backed dataset repo, buckets are not versioned, so deleting
 old data actually reclaims it rather than accumulating history.
 
-`restic` speaks S3, so the repository is `s3:https://s3.hf.co/<namespace>/<bucket>`.
-Credentials come from an HF access token via **Generate S3 credentials**, producing an
-`HFAK…` key ID and a secret shown once. The client settings the gateway requires:
+**`restic` reaches the bucket through `rclone`, not through its own S3 backend.** Spike S1
+ran on 2026-09-02 and settled this; §10.5 records what was measured. The repository is
+`rclone:hf:<bucket>/restic`, and `rclone`'s `hf` remote carries the gateway settings:
 
-| Setting | Value | Why |
-|-|-|-|
-| `region` | `us-east-1` | Required; the gateway is single-region |
-| addressing style | `path` | Buckets are path segments, not subdomains |
-| list version | **`ListObjectsV2` only** | *"`ListObjectsV1` is not supported"* |
-| checksum calculation / validation | `when_required` | Recent clients send trailing CRC32 framing the gateway does not parse |
+```ini
+[hf]
+type = s3
+provider = Other
+endpoint = https://s3.hf.co/<namespace>
+access_key_id = HFAK...
+secret_access_key = ...
+region = us-east-1
+force_path_style = true
+list_version = 2
+upload_cutoff = 2G
+chunk_size = 2G
+```
+
+`region` is required because the gateway is single-region; `force_path_style` because buckets
+are path segments rather than subdomains; `list_version = 2` because *"`ListObjectsV1` is not
+supported"*. Credentials come from an HF access token via **Generate S3 credentials**,
+producing an `HFAK…` key ID and a secret shown once. A **fine-grained token scoped to the one
+bucket** is what the box should hold (§10.2).
 
 **Capacity is not a constraint here.** The account is on the free tier (100 GB private), and
 `contextlab` carries an Academia plan with substantially more. `/srv/models` is excluded
@@ -470,14 +485,44 @@ network, which makes it the better path rather than the fallback. **The second c
 §10.2 stays the answer to deletion**, because immutability has to come from a place the box
 cannot reach, not from a different way of reaching the same place.
 
-### 10.5 One spike before this is relied on
+### 10.5 Spike S1, run 2026-09-02: measured, and it changed the design
 
-**Does `restic` work against the HF S3 gateway?** The gateway supports only
-`ListObjectsV2`, does not store `x-amz-meta-*`, restricts object key shapes, and redirects
-`GetObject` to a CDN edge for clients it does not recognise. `restic` uses `minio-go`, which
-none of that obviously breaks, but none of it is confirmed either. The spike is small: create
-a bucket, `restic init`, back up a directory, `restic check --read-data`, restore, and diff.
-Until that passes, the backup destination is a plan rather than a mechanism.
+**Result: `restic` works against an HF bucket, but only through `rclone`. Its native S3
+backend cannot initialise a repository there.**
+
+**What fails.** `restic -r s3:https://s3.hf.co/<namespace>/<bucket>/restic init` fails at
+`client.BucketExists: 400 Bad Request`. The cause is addressing, not permissions: `restic`
+splits the repository URL at the first path segment after the host, so it reads the
+**namespace** as the bucket and everything after it as a key prefix. Running the same command
+with `-o s3.bucket-lookup=dns` proves it, since it then tries
+`https://<namespace>.s3.hf.co/`. That is the HF documentation's addressing option 2, which it
+warns *"has issues with bucket-level operations such as creating or deleting buckets"*, and
+`init` is exactly a bucket-level operation. Dropping the namespace from the path fails the
+same way, because the gateway then cannot tell which namespace the bucket belongs to.
+
+**What works.** `rclone`'s `s3` backend accepts an endpoint that already contains a path, so
+the namespace stays in the endpoint and the bucket name stays a bare bucket name. `restic`'s
+`rclone:` backend then runs over it. Measured end to end, 7 of 7:
+
+| Step | Result |
+|-|-|
+| `restic init` | Repository created |
+| `restic backup` | 3 files, 1.907 MiB |
+| `restic snapshots` | Snapshot listed |
+| `restic check --read-data` | *"read all data … no errors were found"* |
+| Second backup | Incremental, 3.448 KiB stored |
+| `restic restore` + `diff -r` | **Byte-identical** |
+| `restic forget --keep-last 1 --prune` | Old index and pack deleted; `check` clean afterwards |
+
+**Two things the spike also established.** `rclone` becomes a **dependency of the backup
+path** and must be in the provisioning script (§3), which it was not. And the `prune` step
+succeeding is the empirical confirmation of §10.2: the credential on the box **can** delete
+its own backup history, so the second copy is not a theoretical precaution.
+
+**One cosmetic artefact, recorded so it is not mistaken for a fault.** `rclone` emits
+`NOTICE: … Failed to read last modified` for data objects, because the gateway does not
+return a last-modified time restic's rclone transport expects. It is noise: `check
+--read-data` verified every pack and reported no errors.
 
 ## 11. Updates, logs and maintenance
 
@@ -524,7 +569,7 @@ is labelled as one. **Two spikes and one preflight come before anything destruct
 
 | # | Item | Exit test |
 |-|-|-|
-| **S1** | **Does `restic` work against the HF S3 gateway?** (§10.4) | Create a bucket, `restic init`, back up a directory, `restic check --read-data`, restore to scratch, `diff -r` clean. If it fails, the backup destination is unresolved and B0 cannot complete |
+| ~~**S1**~~ | ~~Does `restic` work against the HF S3 gateway?~~ | ✅ **Done 2026-09-02, and it changed the design** (§10.5). Direct S3 cannot `init`; `restic` over `rclone` passes all seven steps including restore-and-diff and `prune`. `rclone` is now a dependency |
 | **B0** | **Back up the machine that exists today, and prove the backup is real** | The Tensorbook currently holds work. Before repartitioning: back up `/home` and `/etc` to the bucket, restore to scratch storage on a *different* machine, and diff. Then set up the §10.2 second copy and confirm it pulls. **Record explicitly that T5 is open** (a write-capable token on the box can erase the bucket) and that RAID0 is being accepted on those terms |
 | **S2** | **Rehearse the storage install in a disposable VM** | Two full installs from a written runbook, the second reproducing the first exactly. The runbook records partitioning and EFI layout, `mdadm` assembly during early boot, LUKS creation and unlock, btrfs subvolume creation and mount options, `/etc/crypttab`, `/etc/fstab`, initramfs contents, and behaviour when one array member is absent |
 
