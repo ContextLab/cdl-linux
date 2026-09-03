@@ -805,7 +805,7 @@ the namespace stays in the endpoint and the bucket name stays a bare bucket name
 | `restic forget --keep-last 1 --prune` | Old index and pack deleted; `check` clean afterwards |
 
 **Two things the spike also established.** `rclone` becomes a **dependency of the backup
-path** and must be in the provisioning script (§3), which it was not. And the `prune` step
+path** and must be in the install script (§3), which it was not. And the `prune` step
 succeeding is the empirical confirmation of §10.2: the credential on the box **can** delete
 its own backup history, so the second copy is not a theoretical precaution.
 
@@ -831,7 +831,7 @@ should not fill its root subvolume with text.
 | Class | Policy |
 |-|-|
 | Security updates | `unattended-upgrades`, security pocket only, applied automatically |
-| Everything else | Manual, by running the provisioning script, which is where version pins live |
+| Everything else | Manual, by re-running `./install.sh`, which is where version pins live (§3) |
 | **NVIDIA driver and CUDA** | **Pinned, and never in the unattended set.** A driver that updates under an in-flight training run, or that ships a kernel module mismatched to a running kernel, breaks the GPU quietly. Updated deliberately, followed by B2's acceptance test |
 | Kernel | Automatic within the HWE series, and it is the main reason a reboot gets scheduled |
 | Reboot required | `/var/run/reboot-required` is surfaced **on the dashboard**, never acted on automatically. §2.1's passphrase means an automatic reboot would take the machine offline until someone visits it |
@@ -879,7 +879,7 @@ is labelled as one. **Two spikes and one preflight come before anything destruct
 | **B0** | **Back up the machine that exists today, and prove the backup is real** | The Tensorbook currently holds work. Before repartitioning: back up `/home` and `/etc` to the bucket, restore to scratch storage on a *different* machine, and diff. Then set up the §10.2 second copy and confirm it pulls. **Record explicitly that T5 is open** (a write-capable token on the box can erase the bucket) and that RAID0 is being accepted on those terms |
 | **S2** | **Rehearse the storage install in a disposable VM** | Two full installs from `scripts/vm/autoinstall/user-data`, the second reproducing the first. Records partitioning and EFI layout, `mdadm` assembly during early boot, LUKS creation and unlock, subvolume creation, `/etc/crypttab`, `/etc/fstab`, initramfs contents, and behaviour when one array member is absent. **In progress; it has already found that the layout in §2.1 may not be expressible in a stock autoinstall (§2.1.2), which is the kind of thing this spike exists to find before a disk is touched** |
 
-**S2 exists because the provisioning script starts after installation**, so the most
+**S2 exists because `install.sh` starts after installation** (§1.2), so the most
 consequential part of the machine, the storage layout, is currently reproduced by nothing.
 A runbook that has been executed twice is the artifact; prose describing the layout is not.
 
