@@ -136,7 +136,37 @@ A VM installed from `scripts/vm/autoinstall/user-data` and verified over SSH:
 `subvolid=5` is the filesystem's top level. **curtin does not create btrfs subvolumes from an
 autoinstall storage config**, and root is installed directly into the top-level subvolume.
 
-**The decision: migrate to `@` from `install.sh`** (option 2 below). The reasoning is that
+### 2.1.3 The migration has to happen in the installer, and that was measured too
+
+Option 2 below said "migrate to `@` from `install.sh`", meaning from the running system.
+**That is not possible, and both ways of attempting it fail for different reasons:**
+
+| Approach | Result |
+|-|-|
+| Snapshot the running root into `@` | `Could not create subvolume: Text file busy`. btrfs will not snapshot the top-level subvolume while it is mounted as root |
+| Rename the top level's contents into `@` | `Device or resource busy` on `/boot`. A directory with a filesystem mounted on it cannot be renamed, and `/boot`, `/proc`, `/sys`, `/dev` and `/run` all qualify |
+
+Neither is in the documentation, and both cost one VM cycle each to find. On the Tensorbook
+the first would have cost a reinstall and the second would have left a half-migrated root.
+
+**So the migration runs in the installer's `late-commands`**, where the filesystem is mounted
+at `/target` and nothing is executing from it, making the rename an ordinary rename. The
+sequence is: unmount `/target` and its submounts, mount `subvolid=5`, create the three
+subvolumes, move the top level into `@`, move home directories into `@home`, rewrite the
+`fstab` curtin has already written, remount `/target` from `@`, and rebuild GRUB and the
+initramfs.
+
+**That last step needs an explicitly built chroot, not `curtin in-target`.** Unmounting and
+remounting `/target` by hand leaves curtin's record of what is mounted stale, and
+`curtin in-target -- update-grub` then fails with exit 2 and takes the install down. The
+block bind-mounts `proc`, `sys`, `dev`, `dev/pts` and `run` and calls `chroot` directly, so
+everything that knows about this remount is in one place.
+
+**Consequence for §1.2:** the fresh-machine path is now the *only* path that produces the
+subvolume layout. Running `install.sh` on an existing machine cannot add it, and the module
+that tried is retained only as a guard that refuses and explains why.
+
+**The decision: migrate to `@` in the installer** (option 2 below, corrected by §2.1.3). The reasoning is that
 everything else already works, so abandoning the stock installer would discard a working
 layout to fix one property; and the objection to migration — that moving a live root
 filesystem works until it does not — is answerable here in a way it usually is not, because
