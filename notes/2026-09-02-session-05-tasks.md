@@ -7,7 +7,10 @@ Status key: `[ ]` not started · `[~]` in progress · `[x]` done · `[!]` blocke
 
 ## Now
 
-- [~] **V1. Run the VM install end to end.** `scripts/vm/install.sh`. The autoinstall's
+- [~] **V1. Run the VM install end to end.** First attempt failed at `hdiutil attach`:
+  macOS cannot mount an Ubuntu hybrid ISO ("no mountable file systems"). Fixed by extracting
+  `casper/vmlinuz` and `casper/initrd` with `bsdtar`, which reads ISO9660 directly. Second
+  attempt is running; subiquity's UI came up. `scripts/vm/install.sh`. The autoinstall's
   `early-commands` path (md → LUKS → btrfs + three subvolumes, handed to curtin as
   `preserve: true`) is **UNVERIFIED** and this is what settles it. Expect failure on the
   first attempt; curtin's `preserve: true` handling for a pre-built stack is the risky part.
@@ -25,17 +28,22 @@ Status key: `[ ]` not started · `[~]` in progress · `[x]` done · `[!]` blocke
 
 Source: `notes/reviews/2026-09-02-cdl-box-deep-audit.md`
 
-- [ ] **A1. Console interface section (§9).** Authenticated `cdl` home screen on tty1,
+- [x] **A1. Console interface section (§9).** Done: boot chain, no autologin, explicit `cdl`
+  launcher (never `.profile`), tty2 recovery getty, separate local/SSH workspaces, transcript
+  sensitivity, zellij resurrection disabled. Original text below for reference.
+- [-] ~~A1 (original).~~ Authenticated `cdl` home screen on tty1,
   recovery VT, plain-shell escape. **Do not launch zellij from `.profile`** — it would
   capture `scp`, `rsync`, git-over-SSH and recovery sessions. Local inference at the console
   is a stated use case and should be a first-class action.
-- [ ] **A2. Rewrite §3** from "provisioning modules" to the one-script install model.
-- [ ] **A3. Local vs SSH workspaces separate by default**, with an explicit "attach shared"
-  that shows connected clients.
+- [x] **A2. Rewrite §3** to the one-script install model. Adds the properties that matter
+  (idempotent, vanilla Ubuntu only, refuses rather than guesses, per-module runnable, does
+  not touch storage) and states that uninstall is unsupported rather than half-working.
+- [x] **A3. Local vs SSH workspaces** separate by default, `--shared` lists connected
+  clients first. In §9.3.
 - [ ] **A4. Auth split**: strong Unix password for console and sudo; SSH key-only, no root
   login, an allow-group, and `sshd -T` tests of the effective config.
-- [ ] **A5. Session logging sensitivity.** Transcripts can capture code, prompts and tokens.
-  Define mode, retention, and whether they are backed up.
+- [x] **A5. Session logging sensitivity.** §9.4: mode 0600, excluded from backup by default,
+  rotated on §11.1's schedule, zellij resurrection disabled.
 - [ ] **A6. Thermal: a separate GPU policy.** §2.3 sets CPU package thresholds only.
 - [ ] **A7. Backup second copy operational detail**: retention, capacity, encryption,
   alerting, ownership, restore-test cadence.

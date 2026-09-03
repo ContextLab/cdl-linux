@@ -165,19 +165,43 @@ does not kill anything already running, and does not touch agent sessions. A per
 starts a long job on a hot machine is making a choice, and this is not the component that
 overrules it.
 
-## 3. Provisioning: a script, not an image
+## 3. The install script
 
-**Everything below is installed by a re-runnable script**, not baked into a custom ISO.
-`scripts/provision/` holds numbered, idempotent modules (`10-base.sh`, `20-nvidia.sh`,
-`30-agents.sh`, and so on) driven by one entry point.
+One entry point, `./install.sh`, which is what §1 promises and what the Lambda Stack model
+implies. Underneath it are numbered idempotent modules in `install/modules/`
+(`10-base.sh`, `20-nvidia.sh`, `30-models.sh`, `40-agents.sh`, `50-console.sh`,
+`60-backup.sh`), but a person installing this runs one command and reads one summary.
 
-The requirement that matters: **running it twice changes nothing the second time**, and
-running it on a fresh install of the same Ubuntu version reproduces the machine. That is
-the reproducibility a remix ISO was going to buy, at a small fraction of the cost, and it
-is testable in a VM on every change.
+### 3.1 The properties that matter
 
-An ISO stays possible later. It is not a prerequisite for finding out whether the machine
-is pleasant to use, which is the actual open question.
+- **Idempotent.** Running it twice changes nothing the second time. This is the property
+  that makes it safe to re-run after editing one module, and it is the one most easily lost,
+  so §12's B9 tests it rather than assuming it.
+- **Vanilla Ubuntu Server 26.04 is the only prerequisite.** Not a CDL ISO, not a
+  pre-seeded image. Someone who wants to try this on their own machine should not first have
+  to trust an image we built.
+- **It refuses rather than guesses.** Wrong Ubuntu version, wrong architecture, no NVIDIA
+  card: it stops and says which, instead of installing three quarters of a machine.
+- **Every module can be run alone**, so a failure in `20-nvidia.sh` does not mean re-running
+  the whole thing to retry one piece.
+- **It does not touch storage** (§1.2). The layout in §2.1 has to exist before there is a
+  root filesystem to run a script from, so the fresh-machine path uses
+  `install/autoinstall.yaml` with the Ubuntu installer and the script runs afterwards.
+
+### 3.2 What it changes, and what it leaves alone
+
+The script adds third-party APT sources it needs (NVIDIA's, Tailscale's, and so on) and
+installs from them. Those repositories are signed by their own vendors, which is the same
+trust the machine already places in Ubuntu's archive.
+
+**It does not create a CDL repository or CDL packages** (§1.1). Configuration files it owns
+are written under `/etc/cdl/` and marked, so a later version can tell what it put there from
+what a person changed. Anything it would overwrite is backed up beside the original first.
+
+**Uninstall is not supported**, and saying so is fairer than a half-working `--uninstall`
+that leaves a machine in a state nobody has tested. The recovery path for "I do not want
+this any more" is reinstalling Ubuntu, which on this design is a documented procedure
+rather than a disaster.
 
 ## 4. Agent CLIs
 
@@ -416,7 +440,72 @@ contradiction that gets resolved by whoever implements it rather than by whoever
 Anything that changes state belongs in the console or over SSH, where the friction is
 appropriate.
 
-## 9. Terminal environment
+## 9. The console, and the shell
+
+Two equal interfaces: the text console you sit at, and SSH. Draft 2 treated the console as
+an emergency prompt, which was wrong. **Using a local model from the machine itself is a
+stated use case**, so the console has to be somewhere work happens rather than somewhere
+you go when SSH is broken.
+
+### 9.1 The path from power-on to working
+
+```
+firmware
+  -> GRUB          branded menu, recovery entry visible
+  -> Plymouth      branded splash, LUKS passphrase prompt, Escape reveals the log
+  -> getty tty1    branded /etc/issue
+  -> login         ordinary PAM authentication
+  -> cdl           the home screen
+       status          what is running, GPU, disk, last backup
+       chat            talk to a local model, right here
+       workspace       create or attach a zellij workspace
+       maintenance     updates, backup now, logs
+       shell           drop to a plain shell
+```
+
+**`cdl` is launched from the login shell explicitly, never from `.profile`.** That
+distinction is not cosmetic. A launcher in `.profile` runs for every non-interactive session
+too, so it would capture `scp`, `rsync`, `git` over SSH, and any automation, all of which
+expect a clean stdin and a clean stdout. It would also fire on the recovery session someone
+is using precisely because the normal path is broken.
+
+**There is no autologin.** The disk was just unlocked by someone standing at the machine,
+which authenticates the disk rather than the person, and the machine is in an office rather
+than a locked room.
+
+### 9.2 A recovery terminal that is nothing special
+
+**tty2 is an ordinary getty with an ordinary login and an ordinary shell.** No `cdl`, no
+launcher, no zellij. It exists so that a broken home screen, a broken shell configuration
+or a broken zellij is an inconvenience rather than an incident, and it needs no
+documentation beyond knowing it is there.
+
+GRUB's recovery entry stays visible in the menu for the same reason.
+
+### 9.3 Local and remote workspaces are separate by default
+
+`zellij` lets several clients attach to one session, and both can then see the pane contents
+and type into it. That is useful when you mean it and surprising when you do not: a console
+session and an SSH session sharing one workspace means whoever is at the machine sees what
+you are doing remotely, and either can interrupt the other's input.
+
+So **`cdl workspace` gives the console and SSH different sessions by default**, named for
+where they came from. Sharing is available as an explicit `cdl workspace attach --shared`,
+which first lists the clients already connected. The default is separation; sharing is a
+choice made with the information needed to make it.
+
+### 9.4 Transcripts are sensitive, and are treated as such
+
+Session logs (§4.2) capture everything an agent printed, which includes source code,
+prompts, and anything a tool echoed. They are therefore mode 0600, under
+`~/.local/state/cdl/sessions/`, **excluded from the backup by default**, and rotated on
+§11.1's schedule.
+
+`zellij`'s own session resurrection is **disabled**, because a pane's contents surviving a
+reboot in a cache directory is a copy of the same material with none of the same care.
+Anything genuinely worth keeping goes in the worktree, in git, deliberately.
+
+### 9.5 The shell
 
 The part that decides whether this is pleasant to use daily.
 
@@ -427,10 +516,10 @@ The part that decides whether this is pleasant to use daily.
 - **Colours**: one palette across the shell prompt, `zellij`, `bat`, `eza`, `delta` and
   Emacs, checked for contrast at the terminal level rather than assumed. The panel is on
   the Intel iGPU (measured), so console rescue works without the NVIDIA driver.
-- **Tools**: `git`, `gh`, `rg`, `fd`, `jq`, `htop`, `nvtop`, `restic`, `croft`.
+- **Tools**: `git`, `gh`, `rg`, `fd`, `jq`, `htop`, `nvtop`, `restic`, `rclone`, `croft`.
 
-Theming for the shell side is configured on the box, and the client terminal's own configuration
-(fonts, window) stays on the client, where it belongs.
+Theming for the shell side is configured on the box, and the client terminal's own
+configuration (fonts, window) stays on the client, where it belongs.
 
 ## 10. Backup
 

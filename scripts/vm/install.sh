@@ -8,7 +8,7 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck source=lib.sh
 source "$HERE/lib.sh"
 
-require qemu-img "$QEMU" hdiutil curl shasum || die "install the missing tools first"
+require qemu-img "$QEMU" hdiutil curl shasum tar || die "install the missing tools first"
 
 mkdir -p "$VM_WORK"
 ISO="$VM_WORK/$ISO_NAME"
@@ -43,12 +43,14 @@ hdiutil makehybrid -quiet -iso -joliet -default-volume-name CIDATA \
 
 if [[ ! -f "$VM_WORK/vmlinuz" || ! -f "$VM_WORK/initrd" ]]; then
     log "extracting kernel and initrd from the ISO"
-    mnt="$(mktemp -d)"
-    hdiutil attach -quiet -nobrowse -readonly -mountpoint "$mnt" "$ISO" || die "could not mount ISO"
-    cp "$mnt/casper/vmlinuz" "$VM_WORK/vmlinuz" 2>/dev/null || { hdiutil detach -quiet "$mnt"; die "no casper/vmlinuz in ISO"; }
-    cp "$mnt/casper/initrd"  "$VM_WORK/initrd"  2>/dev/null || { hdiutil detach -quiet "$mnt"; die "no casper/initrd in ISO"; }
-    hdiutil detach -quiet "$mnt"
-    rmdir "$mnt" 2>/dev/null || true
+    # bsdtar reads ISO9660 directly, which matters because macOS cannot mount an Ubuntu
+    # hybrid ISO at all: hdiutil reports "no mountable file systems". Extracting rather
+    # than mounting also removes the detach-on-failure path entirely.
+    ( cd "$VM_WORK" && tar -xf "$ISO" casper/vmlinuz casper/initrd ) \
+        || die "could not extract casper/vmlinuz and casper/initrd from the ISO"
+    mv "$VM_WORK/casper/vmlinuz" "$VM_WORK/vmlinuz"
+    mv "$VM_WORK/casper/initrd"  "$VM_WORK/initrd"
+    rmdir "$VM_WORK/casper" 2>/dev/null || true
 fi
 
 # --- 4. blank disks ---------------------------------------------------------------------
