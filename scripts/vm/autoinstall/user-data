@@ -1,0 +1,90 @@
+#cloud-config
+# Autoinstall declaration for the cdl-box storage layout.
+#
+# This file IS the install procedure. Spec §12 asks for a runbook that has been executed
+# twice; a declarative file executed twice is a stronger form of the same thing, because
+# there is no step for a human to perform differently the second time.
+#
+# The layout under test, bottom to top:
+#
+#   vda1 ESP            512M   /boot/efi
+#   vda2 /boot          2G     unencrypted, because GRUB must read the kernel before
+#                              anything is unlocked
+#   vda3 + vdb1         20G ea raid0 -> md0 -> LUKS -> btrfs -> /
+#
+# Sizes are explicit and equal for the two raid members. mdadm tolerates unequal members
+# but wastes the difference, and an accidental mismatch is the kind of thing that is
+# invisible until someone wonders where the space went.
+
+autoinstall:
+  version: 1
+
+  # Serial console, so the harness can drive the LUKS prompt on reboot. This is also how
+  # the real machine should be configured: a headless box whose only console is a screen
+  # nobody is sitting at is harder to recover than one that talks to a serial line.
+  kernel:
+    package: linux-generic
+
+  locale: en_US.UTF-8
+  keyboard:
+    layout: us
+
+  identity:
+    hostname: cdl-box-vm
+    username: cdl
+    # mkpasswd -m sha-512 'cdl-vm-test' -- test-only credential, never leaves the VM
+    password: "$6$rounds=4096$cdlvmtest$1YJHtNQ0hZbdQPBvJ0nCLRoxhY8dMvHOaU8Xw5hLXHUoHYWRlxLZ0zZs.RQ8bYCLIf1XyH2NxvxLxJm2n2xEc/"
+
+  ssh:
+    install-server: true
+    allow-pw: true
+
+  storage:
+    config:
+      - {type: disk, id: disk0, path: /dev/vda, ptable: gpt, wipe: superblock-recursive, preserve: false, grub_device: false}
+      - {type: disk, id: disk1, path: /dev/vdb, ptable: gpt, wipe: superblock-recursive, preserve: false, grub_device: false}
+
+      - {type: partition, id: p_esp, device: disk0, size: 512M, flag: boot, grub_device: true}
+      - {type: format, id: f_esp, volume: p_esp, fstype: fat32}
+      - {type: mount, id: m_esp, device: f_esp, path: /boot/efi}
+
+      # /boot stays outside the encrypted volume. GRUB has to load a kernel and initramfs
+      # before any unlocking can happen, so this is structural rather than a preference.
+      - {type: partition, id: p_boot, device: disk0, size: 2G}
+      - {type: format, id: f_boot, volume: p_boot, fstype: ext4}
+      - {type: mount, id: m_boot, device: f_boot, path: /boot}
+
+      - {type: partition, id: p_raid0, device: disk0, size: 20G}
+      - {type: partition, id: p_raid1, device: disk1, size: 20G}
+
+      - {type: raid, id: md0, name: md0, raidlevel: raid0, devices: [p_raid0, p_raid1]}
+
+      - {type: dm_crypt, id: crypt0, volume: md0, dm_name: cryptroot, key: cdl-vm-test-passphrase}
+
+      - {type: format, id: f_root, volume: crypt0, fstype: btrfs}
+      - {type: mount, id: m_root, device: f_root, path: /}
+
+  packages:
+    - mdadm
+    - cryptsetup
+    - cryptsetup-initramfs
+    - btrfs-progs
+    - restic
+    - rclone
+    - openssh-server
+
+  late-commands:
+    # Serial console on the installed system, so a reboot can be driven and observed
+    # without a display. Matches the headless design.
+    - curtin in-target -- sed -i 's/^GRUB_CMDLINE_LINUX_DEFAULT=.*/GRUB_CMDLINE_LINUX_DEFAULT="console=tty1 console=ttyAMA0,115200"/' /etc/default/grub
+    - curtin in-target -- sed -i 's/^#\?GRUB_TERMINAL=.*/GRUB_TERMINAL="console serial"/' /etc/default/grub
+    - curtin in-target -- update-grub
+
+    # Record what the installer actually produced, so the verification step compares
+    # against reality rather than against this file's intent.
+    - curtin in-target -- sh -c 'mkdir -p /var/log/cdl'
+    - curtin in-target -- sh -c 'lsblk -o NAME,SIZE,TYPE,FSTYPE,MOUNTPOINT > /var/log/cdl/lsblk.txt 2>&1 || true'
+    - curtin in-target -- sh -c 'cat /etc/crypttab > /var/log/cdl/crypttab.txt 2>&1 || true'
+    - curtin in-target -- sh -c 'cat /etc/fstab > /var/log/cdl/fstab.txt 2>&1 || true'
+    - curtin in-target -- sh -c 'cat /proc/mdstat > /var/log/cdl/mdstat.txt 2>&1 || true'
+    - curtin in-target -- sh -c 'lsinitramfs /boot/initrd.img-$(ls /lib/modules | head -1) 2>/dev/null | grep -cE "cryptsetup|md" > /var/log/cdl/initramfs-bits.txt 2>&1 || true'

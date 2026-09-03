@@ -19,7 +19,9 @@ printf '\033[1m== shell syntax and lint ==\033[0m\n'
 have_shellcheck=1
 command -v shellcheck >/dev/null 2>&1 || { have_shellcheck=0; echo "  shellcheck not installed — syntax only"; }
 
-for f in scripts/*.sh tests/*.sh; do
+# scripts/vm/*.sh source a sibling lib.sh, so they need -x to resolve it. Globbing the
+# subdirectory explicitly rather than recursively keeps the set of linted files visible.
+for f in scripts/*.sh scripts/vm/*.sh tests/*.sh; do
     [[ -e "$f" ]] || continue
     lint_files=$((lint_files + 1))
     if ! bash -n "$f"; then
@@ -27,7 +29,7 @@ for f in scripts/*.sh tests/*.sh; do
         suites_failed=$((suites_failed + 1))
         continue
     fi
-    if [[ $have_shellcheck -eq 1 ]] && ! shellcheck "$f"; then
+    if [[ $have_shellcheck -eq 1 ]] && ! (cd "$(dirname "$f")" && shellcheck -x "$(basename "$f")"); then
         printf '  \033[31mSHELLCHECK FAIL\033[0m %s\n' "$f"
         suites_failed=$((suites_failed + 1))
         continue

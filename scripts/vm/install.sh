@@ -1,0 +1,93 @@
+#!/usr/bin/env bash
+# Install cdl-box into a fresh VM, unattended, from scripts/vm/autoinstall/user-data.
+#
+# Running this twice from a clean state and getting the same machine both times is the
+# reproducibility claim spec §12 (S2) asks for. Nothing here is interactive.
+
+HERE="$(cd "$(dirname "$0")" && pwd)"
+# shellcheck source=lib.sh
+source "$HERE/lib.sh"
+
+require qemu-img "$QEMU" hdiutil curl shasum || die "install the missing tools first"
+
+mkdir -p "$VM_WORK"
+ISO="$VM_WORK/$ISO_NAME"
+
+# --- 1. the installer image -------------------------------------------------------------
+
+if [[ ! -f "$ISO" ]]; then
+    log "downloading $ISO_NAME (about 3 GB)"
+    curl -fL --progress-bar -o "$ISO" "$ISO_URL" || die "download failed"
+fi
+
+log "verifying ISO checksum"
+actual="$(shasum -a 256 "$ISO" | awk '{print $1}')"
+[[ "$actual" == "$ISO_SHA256" ]] || die "checksum mismatch: got $actual, expected $ISO_SHA256"
+
+# --- 2. the cloud-init seed -------------------------------------------------------------
+# Subiquity reads its autoinstall config from a volume labelled cidata. The label is what
+# cloud-init looks for, so it is not cosmetic.
+
+log "building the cloud-init seed"
+seed_dir="$VM_WORK/seed"
+rm -rf "$seed_dir" && mkdir -p "$seed_dir"
+cp "$HERE/autoinstall/user-data" "$seed_dir/user-data"
+printf 'instance-id: cdl-box-vm\nlocal-hostname: cdl-box-vm\n' > "$seed_dir/meta-data"
+rm -f "$VM_WORK/seed.iso"
+hdiutil makehybrid -quiet -iso -joliet -default-volume-name CIDATA \
+    -o "$VM_WORK/seed.iso" "$seed_dir" || die "could not build seed ISO"
+
+# --- 3. kernel and initrd ---------------------------------------------------------------
+# The `autoinstall` kernel argument is what stops subiquity pausing for confirmation, and
+# a kernel argument means booting the ISO's kernel directly rather than via its bootloader.
+
+if [[ ! -f "$VM_WORK/vmlinuz" || ! -f "$VM_WORK/initrd" ]]; then
+    log "extracting kernel and initrd from the ISO"
+    mnt="$(mktemp -d)"
+    hdiutil attach -quiet -nobrowse -readonly -mountpoint "$mnt" "$ISO" || die "could not mount ISO"
+    cp "$mnt/casper/vmlinuz" "$VM_WORK/vmlinuz" 2>/dev/null || { hdiutil detach -quiet "$mnt"; die "no casper/vmlinuz in ISO"; }
+    cp "$mnt/casper/initrd"  "$VM_WORK/initrd"  2>/dev/null || { hdiutil detach -quiet "$mnt"; die "no casper/initrd in ISO"; }
+    hdiutil detach -quiet "$mnt"
+    rmdir "$mnt" 2>/dev/null || true
+fi
+
+# --- 4. blank disks ---------------------------------------------------------------------
+
+log "creating two blank ${DISK_SIZE} disks"
+rm -f "$DISK0" "$DISK1"
+qemu-img create -f qcow2 "$DISK0" "$DISK_SIZE" >/dev/null || die "qemu-img failed"
+qemu-img create -f qcow2 "$DISK1" "$DISK_SIZE" >/dev/null || die "qemu-img failed"
+
+# --- 5. UEFI firmware -------------------------------------------------------------------
+
+if [[ "$QEMU" == "qemu-system-aarch64" ]]; then
+    code="$(find_edk2 edk2-aarch64-code.fd)" || die "edk2-aarch64-code.fd not found"
+    vars="$VM_WORK/efi-vars.fd"
+    # aarch64 pflash images must be exactly 64 MiB.
+    [[ -f "$vars" ]] || { dd if=/dev/zero of="$vars" bs=1m count=64 2>/dev/null; }
+    FIRMWARE=(-drive "if=pflash,format=raw,readonly=on,file=$code"
+              -drive "if=pflash,format=raw,file=$vars")
+else
+    code="$(find_edk2 edk2-x86_64-code.fd)" || die "edk2-x86_64-code.fd not found"
+    FIRMWARE=(-drive "if=pflash,format=raw,readonly=on,file=$code")
+fi
+
+# --- 6. run the installer ---------------------------------------------------------------
+
+log "installing (unattended; this takes a while and prints the installer's console)"
+"$QEMU" \
+    -machine "$QEMU_MACHINE" -cpu "$QEMU_CPU" -smp "$VM_CPUS" -m "$VM_MEM" \
+    "${FIRMWARE[@]}" \
+    -kernel "$VM_WORK/vmlinuz" -initrd "$VM_WORK/initrd" \
+    -append "console=ttyAMA0 autoinstall ds=nocloud-net;s=/cdrom/ ---" \
+    -drive "if=none,id=hd0,format=qcow2,file=$DISK0" -device virtio-blk-pci,drive=hd0,serial=cdl0 \
+    -drive "if=none,id=hd1,format=qcow2,file=$DISK1" -device virtio-blk-pci,drive=hd1,serial=cdl1 \
+    -drive "if=none,id=cd0,format=raw,media=cdrom,readonly=on,file=$ISO" -device virtio-blk-pci,drive=cd0 \
+    -drive "if=none,id=cd1,format=raw,media=cdrom,readonly=on,file=$VM_WORK/seed.iso" -device virtio-blk-pci,drive=cd1 \
+    -netdev "user,id=net0,hostfwd=tcp::${SSH_PORT}-:22" -device virtio-net-pci,netdev=net0 \
+    -nographic
+
+rc=$?
+log "installer exited with status $rc"
+log "disks are at $DISK0 and $DISK1; boot with scripts/vm/boot.sh"
+exit $rc
