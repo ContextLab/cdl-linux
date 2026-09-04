@@ -7,55 +7,48 @@ Status key: `[ ]` not started · `[~]` in progress · `[x]` done · `[!]` blocke
 
 ## Now
 
-- [x] **V1. VM install: DONE 2026-09-03.** (`scripts/vm/install.sh`). Settles whether the
-  autoinstall's `early-commands` path works: md → LUKS → btrfs with three subvolumes, handed
-  to curtin as `preserve: true`. Curtin's handling of a pre-built stack is the risky part.
-  - Attempt 1 failed at `hdiutil attach`: macOS cannot mount an Ubuntu hybrid ISO at all
-    ("no mountable file systems"). Fixed by extracting `casper/vmlinuz` and `casper/initrd`
-    with `bsdtar`, which reads ISO9660 directly.
-  - Attempt 2 stopped at subiquity's serial-mode prompt: the autoinstall never took effect.
-    Cause was the kernel cmdline `ds=nocloud-net;s=/cdrom/`, which points cloud-init at the
-    *install ISO* (no `user-data` on it) and so stopped it discovering the CIDATA-labelled
-    seed volume that has one. Fixed by passing `autoinstall` alone and letting NoCloud find
-    the seed by label.
-  - Attempt 3: `early-commands` ran the whole storage stack -- `mdadm --create`,
-    `cryptsetup luksFormat`, `cryptsetup open`, `mkfs.btrfs`, and all three subvolumes
-    (`@`, `@home`, `@models`), and subiquity applied the config through every stage --
-    then **curtin crashed**: `'NoneType' object has no attribute 'size'`. Handing curtin a
-    pre-built stack via `preserve: true` does not work.
-  - **Second obstacle, from Canonical's own docs**: subiquity silently drops
-    `storage:config:mount:options`, which is the field a `subvol=/@` mount needs. So even a
-    working `preserve` path would have mounted the top level, silently.
-  - Attempt 4 (running): let curtin build the stack the way it supports, and ask whether it
-    creates subvolumes on its own. Ubuntu's guided btrfs installs use `@`/`@home`, so the
-    capability exists; whether autoinstall reaches it is the question.
-  - **Recorded in the spec as §2.1.2** with four options and none chosen, because the
-    measurement is not finished. This is the spike doing its job: the layout cannot be
-    assumed, and draft 2 wrote it down as though declaring it made it so.
-  - Attempt 4 (curtin-built stack): **installed with 0 errors**, but then **looped 46 times**
-    -- `install.sh` boots the ISO kernel with `-kernel`, so every reboot re-enters the
-    installer. Booting those disks dropped to the **EFI shell** with no boot entry, which is
-    not worth diagnosing on a filesystem built by 46 overlapping passes.
-  - Two harness fixes: `shutdown: poweroff` in the autoinstall ends the run instead of
-    rebooting, and the EFI vars file is recreated fresh.
-  - Attempt 5 (clean): 0 errors, POWEROFF fired, disks 4.1G/3.9G. **Booting now, and the
-    installed kernel is starting**, so the EFI problem is resolved.
-- [x] **V2. Boot + LUKS unlock: PASS.** The prompt appeared on the serial console, `boot.py`
-  answered it, and SSH came up. md → LUKS → btrfs → systemd → sshd all work.
-- [x] **V3. Verifier: 15 passed, 6 failed**, and all six failures are the subvolume
-  assertions. `/` is mounted from `subvolid=5`. **curtin does not create btrfs subvolumes
-  from an autoinstall storage config** -- the definitive §2.1.2 answer. Three checks of mine
-  were also broken and are fixed: two needed root (sudo with the password on stdin), and one
-  had the `grep -c ... || echo 0` double-zero bug **for the second time this session**.
-- [x] **B1. Guest backup test: 8 passed, 0 failed.** restic 0.18.1 on linux/arm64 with the
-  packaged rclone v1.60.1-DEV (much older than the host's 1.75.0) reaches the HF gateway
-  through QEMU user-mode NAT. Init, backup as root, `check --read-data`, restore, diff,
-  forget+prune, check all pass. One earlier failure was my test running the backup
-  unprivileged: restic exits 3 when it cannot read `/etc/shadow`, and the snapshot was fine.
-- [ ] **V4. Implement and test the `@` migration in the VM** (§2.1.2's chosen option), before
-  it ever runs on the Tensorbook.
-- [ ] **B2. Test the second copy.** §10.2's `rclone copy` pull from a different machine,
-  since that is the only thing standing between a compromised token and total loss.
+Working from the design review recaptured at `de5407f0-a720-4a23-940f-c20047cad9fc:62`
+(2026-09-04, 12,508 chars). Its six blockers and the milestone restructure are done; V4
+itself is the remaining open item.
+
+- [x] **Blocker 1. Migration correctness.** Traversal is find-based (no shell glob), and
+  `/srv/models` contents move rather than being shadowed. **The review's named symptom does
+  not occur** -- `.ssh/authorized_keys` and `.profile` sit inside `/home/<user>`, which the
+  old `/home/*` glob did match. The real gaps were a hidden entry *directly* in `/home` and
+  `..`-prefixed names. **The bigger defect was the primitive:** `mv` across a btrfs
+  subvolume hits EXDEV and degrades to copy+unlink, breaking hardlinks. `@` is now a
+  `btrfs subvolume snapshot`; the two splits use `cp -a --reflink=auto`.
+- [x] **Blocker 2. Interruption safety.** `install/installer/migrate-btrfs-root.sh`: stages
+  recorded to `.cdl-migration-state` on the top-level subvolume, EXIT trap, refuses on a
+  live system, exits 0 if already migrated, distinguishes empty leftovers from a populated
+  `@`, validates everything **before** touching the bootloader.
+- [x] **Blocker 3. curtin ambiguity.** Everything uses `chroot /target`.
+- [x] **Blocker 4. Autoinstall hygiene.** Duplicate `shutdown` removed; strict duplicate-key
+  validation added and proven against the commit that shipped the dupe; production profile
+  split to `install/autoinstall/tensorbook.yaml` with placeholders only, matched by disk
+  identity with a count guard.
+- [x] **Blocker 5. Install framework.** `install.sh` + `install/lib.sh` +
+  `00-preflight.sh` + `10-base.sh`, 19 assertions.
+- [x] **Blocker 6. Normative text.** §2.1 condensed to one contract; experiments moved to
+  `notes/2026-09-03-storage-experiments.md`; subsections reordered; §12 restructured.
+- [x] **Test suite split.** `run-all.sh` (fast, 24 files linted, 5 suites), `run-vm.sh`,
+  `run-destructive.sh`. Full failing-suite output preserved to a named file.
+- [~] **V4. The migration, proven.** Install #3 running now with the corrected script.
+  **Needs two clean runs**, then boot + `verify.sh` + `fixture/verify.sh`.
+- [ ] **B2. Second backup copy** (§10.2 `rclone copy` pull from another machine).
+
+### What the three VM runs have cost, and bought
+
+| Run | Outcome |
+|-|-|
+| 1 | Inline migration, exit 2. Cause found by reading, not from the log: `awk` read an fstab path under a directory the script had just unmounted. Installer sat at `Press enter to start a shell` for six hours |
+| 2 | `write_files` **does not reach subiquity's late-commands environment**. Every `test -x` guard fired and the run stopped *before* the fixture or the migration. The guards are why this was a finding and not a half-migrated filesystem |
+| 3 | Running now: base64 decoded in late-commands, migration output teed to `/target/var/log/cdl/migration-run.log` |
+
+**A correction that stands:** the spec claimed `curtin in-target` fails after a manual
+remount because of stale mount bookkeeping. That was asserted, not measured. Run 1 replaced
+curtin with an explicit chroot and still exited 2 -- but from `awk`, before reaching the
+chroot. The curtin explanation remains untested and is now recorded as open.
 
 ## Then: remaining audit items
 
