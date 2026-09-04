@@ -5,6 +5,7 @@
 # reproducibility claim spec §12 (S2) asks for. Nothing here is interactive.
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
+REPO="$(cd "$HERE/../.." && pwd)"
 # shellcheck source=lib.sh
 source "$HERE/lib.sh"
 
@@ -41,34 +42,8 @@ fi
 # fell back to its default guided LVM layout: no md, no LUKS, ext4 root. Nothing failed, and
 # only the verifier noticed. Required keys are cheap to assert and this is where to do it.
 log "validating the autoinstall config"
-python3 - "$HERE/autoinstall/user-data" <<'PYCHECK' || die "autoinstall config is not valid"
-import sys, yaml
-required = {"version", "identity", "ssh", "storage", "packages", "late-commands"}
-try:
-    doc = yaml.safe_load(open(sys.argv[1]))
-except yaml.YAMLError as e:
-    sys.exit(f"  not valid YAML: {e}")
-a = doc.get("autoinstall")
-if not isinstance(a, dict):
-    sys.exit("  no top-level 'autoinstall' mapping")
-missing = required - set(a)
-if missing:
-    sys.exit(f"  missing required keys: {sorted(missing)}")
-cfg = a["storage"].get("config") or []
-kinds = {e.get("type") for e in cfg}
-for need in ("disk", "partition", "raid", "dm_crypt", "format", "mount"):
-    if need not in kinds:
-        sys.exit(f"  storage config has no '{need}' entry; the layout would not be built")
-ids = {e.get("id") for e in cfg}
-for e in cfg:
-    for k in ("device", "volume"):
-        if isinstance(e.get(k), str) and e[k] not in ids:
-            sys.exit(f"  {e.get('id')} references unknown {k} '{e[k]}'")
-    for d in e.get("devices", []):
-        if d not in ids:
-            sys.exit(f"  raid {e.get('id')} references unknown device '{d}'")
-print(f"  ok: {len(cfg)} storage entries, types {sorted(kinds)}")
-PYCHECK
+python3 "$REPO/scripts/validate-autoinstall.py" "$HERE/autoinstall/user-data" \
+    || die "autoinstall config is not valid"
 
 log "building the cloud-init seed"
 seed_dir="$VM_WORK/seed"
@@ -76,8 +51,27 @@ rm -rf "$seed_dir" && mkdir -p "$seed_dir"
 # Substitute this checkout's public key into the seed. The committed file carries a
 # placeholder so that a clone does not inherit somebody else's key.
 pubkey="$(cat "${VM_KEY}.pub")"
-sed "s|@@CDL_VM_PUBKEY@@|${pubkey}|" "$HERE/autoinstall/user-data" > "$seed_dir/user-data"
-grep -q '@@CDL_VM_PUBKEY@@' "$seed_dir/user-data" && die "public key substitution failed"
+
+# The installer-side scripts are carried into the seed as base64. They live in the
+# repository as ordinary executable files -- shellcheck'd and runnable -- rather than as
+# text inside YAML, and base64 means no indentation rule can corrupt them in transit.
+b64() { base64 < "$1" | tr -d '\n'; }
+migrate_b64="$(b64 "$REPO/install/installer/migrate-btrfs-root.sh")"
+fixture_b64="$(b64 "$HERE/fixture/create.sh")"
+
+sed -e "s|@@CDL_VM_PUBKEY@@|${pubkey}|" \
+    -e "s|@@CDL_B64_MIGRATE@@|${migrate_b64}|" \
+    -e "s|@@CDL_B64_FIXTURE@@|${fixture_b64}|" \
+    "$HERE/autoinstall/user-data" > "$seed_dir/user-data"
+
+for ph in CDL_VM_PUBKEY CDL_B64_MIGRATE CDL_B64_FIXTURE; do
+    grep -q "@@${ph}@@" "$seed_dir/user-data" && die "substitution failed for ${ph}"
+done
+
+# Validate the SUBSTITUTED seed too. The template validates with placeholders in place;
+# this checks what the installer will actually read.
+python3 "$REPO/scripts/validate-autoinstall.py" "$seed_dir/user-data" \
+    || die "substituted seed is not valid"
 printf 'instance-id: cdl-box-vm\nlocal-hostname: cdl-box-vm\n' > "$seed_dir/meta-data"
 rm -f "$VM_WORK/seed.iso"
 hdiutil makehybrid -quiet -iso -joliet -default-volume-name CIDATA \

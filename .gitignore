@@ -19,3 +19,8 @@ notes/research/*-raw.json
 notes/hardware/*
 !notes/hardware/README.md
 !notes/hardware/tensorbook-profile.md
+
+# macOS and Python detritus
+.DS_Store
+__pycache__/
+*.py[cod]
