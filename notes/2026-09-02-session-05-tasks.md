@@ -33,17 +33,49 @@ itself is the remaining open item.
   `notes/2026-09-03-storage-experiments.md`; subsections reordered; §12 restructured.
 - [x] **Test suite split.** `run-all.sh` (fast, 24 files linted, 5 suites), `run-vm.sh`,
   `run-destructive.sh`. Full failing-suite output preserved to a named file.
-- [~] **V4. The migration, proven.** Install #3 running now with the corrected script.
-  **Needs two clean runs**, then boot + `verify.sh` + `fixture/verify.sh`.
+- [x] **V4. The migration works, and is verified on three consecutive installs.**
+  Runs 7, 8 and 9 each: migration exit 0 through all eight stages, disks boot, LUKS unlocks
+  at the console, SSH comes up, `verify.sh` **21 passed / 0 failed**, fixture
+  **30 passed / 0 failed**. Every hidden file, the hidden entry directly in `/home`, the
+  `..`-prefixed name, the hardlink pair, all three symlinks, the awkward filename, both
+  owners and the model weights survived with content, mode, uid, gid and link count intact.
+  - Guards exercised on a live machine, not reasoned about: re-run against an
+    already-migrated target exits 0; a non-mountpoint is refused; a target on the same
+    device but not on `@` is refused by the partial-migration guard with two recovery
+    routes, leaving all three subvolumes untouched.
 - [ ] **B2. Second backup copy** (§10.2 `rclone copy` pull from another machine).
 
-### What the three VM runs have cost, and bought
+## Open: subiquity cannot copy its own logs into the target
+
+Every install ends with subiquity's `cp -a /var/log/cloud-init.log /var/log/installer`
+failing (exit 1), which makes the run report "An error occurred" after everything has
+actually worked. `/var/log/installer/` on the installed machine holds only
+`casper-md5check.json` and `media-info`; the subiquity and cloud-init logs are absent.
+
+**Not established whether this is caused by our changes.** It surfaced only after the
+`umount --recursive /target` failure was fixed, so it may have been there all along, masked
+by the earlier error. The plausible link is that the migration remounts `/target`, which is
+exactly the stale-bookkeeping condition earlier drafts *asserted* breaks `curtin in-target`
+-- so this may be the first real evidence for a claim that was previously written down
+without any.
+
+**Impact is bounded and does not block V4:** what is lost is installer diagnostics on the
+installed machine. Our own evidence is written independently and is present --
+`/var/log/cdl/` holds 12 files including `migration-run.log` with the full command trace,
+`migration.txt`, the fixture manifest, and the recorded `lsblk`/`fstab`/`crypttab`/`mdstat`.
+
+### What the VM runs have cost, and bought
 
 | Run | Outcome |
 |-|-|
 | 1 | Inline migration, exit 2. Cause found by reading, not from the log: `awk` read an fstab path under a directory the script had just unmounted. Installer sat at `Press enter to start a shell` for six hours |
 | 2 | `write_files` **does not reach subiquity's late-commands environment**. Every `test -x` guard fired and the run stopped *before* the fixture or the migration. The guards are why this was a finding and not a half-migrated filesystem |
-| 3 | Running now: base64 decoded in late-commands, migration output teed to `/target/var/log/cdl/migration-run.log` |
+| 3 | `/run` is mounted **noexec** in the installer, so a decoded, chmod'd script exits 126. Scripts are handed to `bash` instead |
+| 4 | Migration ran, exited 1, and its log was unreachable -- copied to `/target`, which the script unmounts, and `cat` went to a journal the harness cannot read. Log now goes to `/dev/console`, plus xtrace with line numbers |
+| 5 | The log paid for itself: `mount '#' /target/boot`. curtin writes fstab comments like `# /boot was on /dev/vda2`, where `$1` is `#` and `$2` is `/boot`, so an awk rule keyed on `$2` alone matched a comment |
+| 6 | Migration **succeeded**; disks boot and verify 21/21. Three harness defects found: verifier's `sudo` had no password so `btrfs subvolume list` returned empty and read as "absent"; `boot.py` reported SSH up after its own qemu failed to take the image lock, probing another VM through the same port; the fixture had overwritten the real `authorized_keys` |
+| 7, 8 | Clean installs, 21/21 and 30/30. Ended with subiquity's `umount --recursive /target` failing: late-commands left `/target/sys` mounted **inside itself**, because one teardown ran a single `umount -R ... \|\| true` and the next block rbind'd over what was left |
+| 9 | Mounts clean. A different, probably pre-existing subiquity failure surfaced behind it (see above) |
 
 **A correction that stands:** the spec claimed `curtin in-target` fails after a manual
 remount because of stale mount bookkeeping. That was asserted, not measured. Run 1 replaced
