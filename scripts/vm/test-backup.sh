@@ -45,8 +45,17 @@ sshv 'command -v restic && command -v rclone' >/dev/null 2>&1 \
 
 # The whole test runs as one remote script so credentials cross once, live in a
 # tmpfs-backed file the script removes, and never touch the guest's persistent disk.
+#
+# The values go in on STDIN, prepended to the script, never on the ssh command line. A
+# remote command line is an argv in the guest's process table and `ps` is world-readable
+# there, so `ssh host "AWS_SECRET=... bash -s"` publishes the secret to every account on
+# the machine for as long as the command runs. printf %q quotes them safely for re-parsing.
 log "running the backup round trip inside the VM"
-sshv "AWS_KEY='$K' AWS_SECRET='$V' NS='$NS' BUCKET='$BUCKET' VMPW='$VM_PASSWORD' bash -s" <<'REMOTE'
+remote_env() {
+    printf 'AWS_KEY=%q\nAWS_SECRET=%q\nNS=%q\nBUCKET=%q\nVMPW=%q\nexport AWS_KEY AWS_SECRET NS BUCKET VMPW\n' \
+        "$K" "$V" "$NS" "$BUCKET" "${1:-}"
+}
+{ remote_env "$VM_PASSWORD"; cat <<'REMOTE'
 set -uo pipefail
 pass=0; fail=0
 step() {
@@ -114,15 +123,17 @@ rm -f "$conf"
 printf '\n== guest backup test: %d passed, %d failed ==\n' "$pass" "$fail"
 [[ $fail -eq 0 ]]
 REMOTE
+} | sshv 'bash -s'
 rc=$?
 
 log "cleaning up the test bucket contents"
-sshv "AWS_KEY='$K' AWS_SECRET='$V' NS='$NS' BUCKET='$BUCKET' bash -s" <<'CLEAN' >/dev/null 2>&1
+{ remote_env; cat <<'CLEAN'
 conf="$(mktemp)"; chmod 600 "$conf"
 printf '[hf]\ntype = s3\nprovider = Other\nendpoint = https://s3.hf.co/%s\naccess_key_id = %s\nsecret_access_key = %s\nregion = us-east-1\nforce_path_style = true\nlist_version = 2\n' \
     "$NS" "$AWS_KEY" "$AWS_SECRET" > "$conf"
 RCLONE_CONFIG="$conf" rclone purge "hf:${BUCKET}/restic"
 rm -f "$conf"
 CLEAN
+} | sshv 'bash -s' >/dev/null 2>&1
 
 exit $rc

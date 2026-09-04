@@ -8,7 +8,10 @@ below that describes this machine was measured there, not assumed.
 
 ## 1. What this is
 
-**`cdl-linux` is one install script.** It runs on a stock Ubuntu Server 26.04 machine and
+**`cdl-linux` is a reproducible workstation configuration for Ubuntu Server 26.04,
+optimised for local and remote agent work, model serving, and GPU training.**
+
+In practice that is one install script. It runs on a stock Ubuntu Server 26.04 machine and
 turns it into a workstation that serves local models, runs coding agents, and trains on the
 GPU. The model is Lambda Stack, which is already on this hardware and installs with
 `wget -nv -O- https://lambda.ai/install-lambda-stack.sh | sh -`: one command, vanilla
@@ -38,16 +41,27 @@ build the apparatus that discharges it. If this ever acquires users who need tho
 guarantees, the packages are the natural unit to add signing to, and that is the upgrade
 path.
 
-### 1.2 Two install paths, because a script cannot repartition the disk it runs from
+### 1.2 Two supported modes
 
-| Situation | Path |
+| Mode | What it is |
 |-|-|
-| **Fresh machine**, and you want the storage layout in §2.1 | Install Ubuntu Server with `install/autoinstall.yaml`, which declares the layout, then run `./install.sh` |
-| **Existing machine**, whatever its storage | Run `./install.sh`. It configures everything except storage, and says so rather than pretending |
+| **Portable** | Run `./install.sh` on an existing Ubuntu Server 26.04 installation. **Storage is left exactly as it is.** Everything else is configured |
+| **Appliance** | Install Ubuntu with the supplied autoinstall profile to get the storage layout in §2.1, then run `./install.sh` |
 
-The split is honest rather than convenient: the striped, encrypted layout has to be built
-before there is a root filesystem to run a script from. Lambda Stack has the same boundary
-and does not touch your disks either.
+**The autoinstall profile is an optional hardware-specific companion, not a distribution.**
+It exists because a script cannot repartition the disk it is running from: the striped,
+encrypted layout has to be built before there is a root filesystem to run a script from.
+Lambda Stack has the same boundary and does not touch your disks either.
+
+Portable mode is the one that works on anyone else's machine, and it is the mode this
+project can honestly claim to support. Appliance mode is specific to a two-NVMe Tensorbook
+and is where all of the destructive risk lives.
+
+**Branding starts after Ubuntu boots.** The installer and Canonical's signed boot components
+stay recognisably Ubuntu: replacing shim, GRUB or the kernel means disabling Secure Boot or
+enrolling our own key, and that cost buys nothing. Everything from the Plymouth theme and
+the LUKS prompt onward -- getty and `kmscon` presentation, the `cdl` console launcher, the
+shell, the palette, the dashboard and the documentation -- is ours. §9.8 has the stages.
 
 ### 1.3 Console-first, not headless
 
@@ -77,7 +91,7 @@ launcher. It does not bring back a display session, and none of the risk that ca
 |-|-|-|
 | Distribution | **Ubuntu Server 26.04 LTS** | Signed NVIDIA modules under Secure Boot; five years of updates; the CUDA path is well-trodden |
 | Install | Stock installer, minimal, **no** `ubuntu-desktop` | Nothing needs a display |
-| Kernel | Stock HWE | The AX210 wifi is on in-kernel `iwlwifi`, so no firmware package is needed (measured) |
+| Kernel | `linux-generic-hwe-26.04`, tracking the HWE series and never a mainline or vendor kernel | Pinning to a specific version would strand the machine on unpatched kernels; a mainline kernel loses the signed modules Secure Boot needs (§2.1.1) and Canonical's NVIDIA packaging. The AX210 wifi is on in-kernel `iwlwifi`, so no firmware package is needed (measured) |
 | Secure Boot | **On** | Signed NVIDIA modules load; nothing here needs hibernation. **Not the same as verified boot**, see §2.1.1 |
 | Swap | 8 GiB file | Sized for pressure relief, not for hibernation |
 
@@ -116,117 +130,6 @@ more heavily used one. Two consequences follow and both are requirements rather 
   here rather than in a footnote, and building the second copy is the cheapest thing that
   closes it.
 
-### 2.1.2 The subvolumes are not reachable from the stock installer — measured
-
-**Settled by spike S2 on 2026-09-03. Everything in §2.1 works except the subvolumes.**
-
-A VM installed from `scripts/vm/autoinstall/user-data` and verified over SSH:
-
-| Assertion | Result |
-|-|-|
-| `md0` exists, is raid0, has two members | **PASS** |
-| LUKS open on `md0`, backing device is `md0` | **PASS** |
-| Root is btrfs on the mapped device | **PASS** |
-| `/boot` outside the encryption; `crypttab` references `md0` | **PASS** |
-| initramfs carries `cryptsetup` and md support | **PASS** |
-| The machine booted off the array, unlocking at the console | **PASS** |
-| Subvolumes `@`, `@home`, `@models` exist | **FAIL — none exist** |
-| `/` mounted from `subvol=/@` | **FAIL — `subvolid=5,subvol=/`** |
-
-`subvolid=5` is the filesystem's top level. **curtin does not create btrfs subvolumes from an
-autoinstall storage config**, and root is installed directly into the top-level subvolume.
-
-### 2.1.3 The migration has to happen in the installer, and that was measured too
-
-Option 2 below said "migrate to `@` from `install.sh`", meaning from the running system.
-**That is not possible, and both ways of attempting it fail for different reasons:**
-
-| Approach | Result |
-|-|-|
-| Snapshot the running root into `@` | `Could not create subvolume: Text file busy`. btrfs will not snapshot the top-level subvolume while it is mounted as root |
-| Rename the top level's contents into `@` | `Device or resource busy` on `/boot`. A directory with a filesystem mounted on it cannot be renamed, and `/boot`, `/proc`, `/sys`, `/dev` and `/run` all qualify |
-
-Neither is in the documentation, and both cost one VM cycle each to find. On the Tensorbook
-the first would have cost a reinstall and the second would have left a half-migrated root.
-
-**So the migration runs in the installer's `late-commands`**, where the filesystem is mounted
-at `/target` and nothing is executing from it, making the rename an ordinary rename. The
-sequence is: unmount `/target` and its submounts, mount `subvolid=5`, create the three
-subvolumes, move the top level into `@`, move home directories into `@home`, rewrite the
-`fstab` curtin has already written, remount `/target` from `@`, and rebuild GRUB and the
-initramfs.
-
-**The step after the migration uses an explicitly built chroot, not `curtin in-target`.**
-The reason given here in an earlier draft was that remounting `/target` by hand leaves
-curtin's mount bookkeeping stale, making `curtin in-target -- update-grub` fail with exit 2.
-**That explanation was asserted, not measured, and it should not have been written as
-fact.** A later run replaced curtin with an explicit chroot and failed with exit 2 again --
-but from `awk`, several lines earlier, reading an fstab path under a directory the script
-had just unmounted. It never reached `update-grub`, so it says nothing either way about
-curtin. The curtin diagnosis is untested and is recorded here as an open question, not a
-finding.
-
-The chroot is used regardless, for a reason that does not depend on that question: the
-migration remounts `/target`, and having one helper for every target operation means there
-is a single answer to "how do we run something in the target" rather than two that must be
-kept in agreement.
-
-**The defect that run did find is worth more than the one it was looking for.** With
-`set -e`, an `awk` that cannot open its input exits 2 and takes the whole installation down
-with a message that names the entire script rather than the line. Nothing was written to the
-target, the installer stopped at an interactive `Press enter to start a shell`, and the
-`set -x` trace went to the guest's journal, which is unreachable from the harness. That is
-the concrete argument for §2.1.4: a destructive procedure needs recorded stages on the
-filesystem, because the failure that matters is the one that leaves you unable to ask what
-happened.
-
-**Consequence for §1.2:** the fresh-machine path is now the *only* path that produces the
-subvolume layout. Running `install.sh` on an existing machine cannot add it, and the module
-that tried is retained only as a guard that refuses and explains why.
-
-**The decision: migrate to `@` in the installer** (option 2 below, corrected by §2.1.3). The reasoning is that
-everything else already works, so abandoning the stock installer would discard a working
-layout to fix one property; and the objection to migration — that moving a live root
-filesystem works until it does not — is answerable here in a way it usually is not, because
-the VM harness can run the migration repeatedly and destructively at no cost. **It is not to
-run on the Tensorbook until it has run in the VM**, which is a milestone rather than a note.
-
-The options as they stood, kept because the decision may be revisited:
-
-**Original assessment, before the measurement:** The layout above wants
-three btrfs subvolumes with root installed into `@`. Two obstacles have been measured, and
-neither was anticipated:
-
-1. **Building the stack beforehand and handing curtin `preserve: true` crashes it.** VM
-   attempt 3 created the md, LUKS, btrfs and all three subvolumes successfully in
-   `early-commands`, and curtin then failed the install step with
-   `'NoneType' object has no attribute 'size'`.
-2. **Subiquity is documented to silently drop `storage:config:mount:options`.** That is the
-   field a `subvol=/@` mount would use, so even a working `preserve` path would have mounted
-   the top-level subvolume rather than `@`, and would have done it without an error.
-
-If the stock installer cannot produce this layout, the options are, in the order we would
-consider them:
-
-| Option | Cost |
-|-|-|
-| **Root not in a subvolume**, with `@home` and `@models` created afterwards | Loses §11.4's rollback, which needs a snapshot of root. That is the reason `@` is here at all |
-| **Migrate to `@` from `install.sh`** — **chosen** | Coherent with the one-script model. Moving a live root filesystem is the kind of operation that works until it does not, which is why it is gated on passing in the VM first |
-| **Drop btrfs for root** and use ext4, keeping btrfs only for `/srv/models` | Simplest, and loses snapshots on the thing snapshots were for |
-| **Abandon the stock installer** for storage | Contradicts §1.2 and is most of what a custom ISO was going to cost |
-
-**No option is chosen yet, because the measurement is not finished.** What is already
-settled is that the layout cannot be assumed: draft 2 wrote it down as though declaring it
-made it so, and the harness that was supposed to check it passed a filesystem with no
-subvolumes at all.
-
-**A considered alternative, rejected for a practical reason.** Two LUKS devices with btrfs
-spanning both (`-d raid0 -m raid1`) would stripe data while mirroring metadata, so a
-single-device failure would leave a mountable filesystem that can at least enumerate what
-was lost. The Ubuntu installer cannot produce that layout, and building it by hand
-contradicts §3's stock-installer premise. It should be revisited if the storage layout is ever
-rebuilt outside the installer.
-
 ### 2.1.1 What Secure Boot buys, and what it does not
 
 Ubuntu's chain validates the shim, GRUB, the kernel and kernel modules, which is what lets
@@ -239,6 +142,75 @@ So this design claims **signed kernel and modules**, and does **not** claim veri
 The gap is real rather than theoretical, and it is part of what physical access to the
 machine buys an attacker. Stating it narrowly is the point: a security property described
 more broadly than it holds is worse than one nobody claimed.
+
+### 2.1.2 The subvolume layout, and how it is built
+
+**The contract.** Curtin creates the md/LUKS/btrfs stack with root initially in the
+top-level subvolume, because curtin cannot create btrfs subvolumes from an autoinstall
+storage config. An installer late-command then migrates the installed target into `@`,
+`@home` and `@models` before first boot. **This path is experimental until V4 passes twice
+from clean disks.**
+
+That is the whole of the normative decision. The measurements behind it -- what the stock
+installer will and will not do, why the migration cannot run on a live system, and how the
+first attempt failed -- are in `notes/2026-09-03-storage-experiments.md`. They are evidence
+worth keeping and they were obscuring the contract by sitting inside it.
+
+**Consequence for §1.2, and it is not a small one:** the appliance path is the *only* path
+that produces this layout. Running `install.sh` on an existing machine cannot add it, so
+`install/modules/15-btrfs-subvolumes.sh` is a guard that refuses and explains, not an
+attempt. A machine without the layout is fully supported; what it loses is §11.4's rollback.
+
+### 2.1.3 The migration runs in the installer, because it cannot run anywhere else
+
+Both ways of migrating a live root were measured and both fail: btrfs will not snapshot the
+top-level subvolume while it is mounted as root (`Text file busy`), and a directory with a
+filesystem mounted on it cannot be renamed (`Device or resource busy` on `/boot`). Neither
+is documented anywhere we could find, and each cost a VM cycle.
+
+In `late-commands` the filesystem is mounted at `/target` and nothing is executing from it,
+which makes the whole operation ordinary.
+
+**The primitive matters more than the traversal.** A btrfs subvolume is a separate inode
+namespace, so `rename(2)` across one returns `EXDEV` and `mv` silently degrades to
+copy-then-unlink -- which breaks hardlinks between moved files and rewrites every inode.
+`@` is therefore created with `btrfs subvolume snapshot`, which is atomic, costs no space,
+and preserves hardlinks, ownership, modes, timestamps, xattrs and ACLs exactly. The two
+directory-level splits (`/home` into `@home`, `/srv/models` into `@models`) use
+`cp -a --reflink=auto`, whose `--preserve=all` includes hardlinks.
+
+### 2.1.4 The migration is a script with stages, not a string in a YAML file
+
+`install/installer/migrate-btrfs-root.sh` is delivered into the installer as base64 in
+`write_files`, so the repository file is the single source of truth and no YAML indentation
+rule can corrupt it.
+
+It is a separate file because the first version was not, and the difference is not
+stylistic. A destructive procedure written inside an autoinstall string cannot be
+shellcheck'd, cannot be run outside an installer, and -- the part that cost six hours --
+fails with a message naming the entire script while its trace goes to a journal the harness
+cannot reach.
+
+The script therefore:
+
+| Property | Why |
+|-|-|
+| Refuses when `/target` and `/` are the same filesystem | It must never run on a live system, and a sentence saying so is not a check |
+| Exits 0 when root is already on `@` | `late-commands` can re-run; "already done" is success |
+| Distinguishes empty leftover subvolumes from a populated `@` | The first is clearable, the second must not be guessed at |
+| Records each stage to `.cdl-migration-state` on the top-level subvolume | The failure that matters is the one that leaves you unable to ask what happened |
+| Cleans up its mounts from an `EXIT` trap | An interrupted run must not leave `/tmp/cdl-top` mounted |
+| Checks free space and that btrfs recognises the device first | Cheap, and the alternative is failing halfway |
+| **Validates all three subvolumes, the fstab, and the moved system before touching the bootloader** | `update-grub` and `update-initramfs` against a half-migrated tree produce a machine that does not boot |
+| Uses `chroot /target` for every target operation | One answer to "how do we run something in the target" rather than two that must agree |
+| Writes evidence to `/var/log/cdl/migration.txt` in the target | The installed machine can say how it was built |
+
+**V4 is not complete.** It requires two clean VM installations, root on `subvol=/@`, `/home`
+and `/srv/models` on their subvolumes, SSH key login after reboot, and every fixture file
+surviving with its ownership, modes, links, xattrs and content intact. The fixture is
+generated in the installer before the migration and records a manifest of what is actually
+on disk; `scripts/vm/fixture/verify.sh` diffs the same measurements after reboot, so no
+expectation is written down twice where the two copies could drift.
 
 ### 2.2 Two hardware findings that need OS-level fixes
 
@@ -1069,7 +1041,7 @@ that needs finding out before the model-serving and agent layers get built on to
 | # | Question | Why it is open |
 |-|-|-|
 | 1 | Which machine holds the second backup copy, and how often does it pull? | §10.2 makes a second copy a requirement rather than advice, because the HF bucket has no versioning and no lifecycle rules. The pull schedule sets how long a wipe can go unnoticed. (The earlier question here, whether `restic` works against the gateway, was answered by spike S1 on 2026-09-02: not directly, but through `rclone` -- §10.5) |
-| 3 | Can one stored copy serve both Ollama and `llama-server`? | **S3 in §12.** Decides whether `/srv/models` holds one copy of a model or two |
-| 4 | Are `croft` and the Emacs LLM integration still wanted? | Both came from the original requirements list, which predates the console-first decision |
-| 5 | Is a UPS worth buying? | §7.1: it converts the commonest cause of an unattended reboot from an office trip into nothing. Cheap, and outside this spec |
-| 6 | Which GPU drives an external display, if one is ever attached | Deferred from M0. The console is text-only, so this only matters if a monitor is ever attached |
+| 2 | Can one stored copy serve both Ollama and `llama-server`? | **S3 in §12.** Decides whether `/srv/models` holds one copy of a model or two |
+| 3 | Are `croft` and the Emacs LLM integration still wanted? | Both came from the original requirements list, which predates the console-first decision |
+| 4 | Is a UPS worth buying? | §7.1: it converts the commonest cause of an unattended reboot from an office trip into nothing. Cheap, and outside this spec |
+| 5 | Which GPU drives an external display, if one is ever attached | Deferred from M0. The console is text-only, so this only matters if a monitor is ever attached |

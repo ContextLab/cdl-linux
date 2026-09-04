@@ -76,6 +76,7 @@ want = {
     "/run/cdl/migrate-btrfs-root.sh": repo + "/install/installer/migrate-btrfs-root.sh",
     "/run/cdl/fixture-create.sh":     repo + "/scripts/vm/fixture/create.sh",
     "/run/cdl/fixture-verify.sh":     repo + "/scripts/vm/fixture/verify.sh",
+    "/run/cdl/fixture-verify.sh":     repo + "/scripts/vm/fixture/verify.sh",
 }
 got = {f["path"] for f in d.get("write_files", [])}
 assert got == set(want), f"seed delivers {got}, expected {set(want)}"
@@ -98,6 +99,51 @@ assert "curtin in-target" not in joined, "curtin in-target is used after the rem
 PY
 then ok "late-commands check for delivered scripts and never use curtin in-target"
 else bad "late-commands are missing a check, or still use curtin in-target"; fi
+
+# --- the production profile ---
+TB="$repo/install/autoinstall/tensorbook.yaml"
+if python3 "$V" "$TB" >/dev/null 2>&1; then ok "the Tensorbook profile validates"
+else bad "Tensorbook profile invalid: $(python3 "$V" "$TB" 2>&1 | tail -3)"; fi
+
+# This repository is public. A committed passphrase is a published passphrase, and rotating
+# a LUKS passphrase afterwards does not un-publish the one the disk was created with.
+if python3 - "$TB" <<'PY'
+import sys, yaml
+d = yaml.safe_load(open(sys.argv[1]))
+a = d["autoinstall"]
+key = next(e["key"] for e in a["storage"]["config"] if e.get("type") == "dm_crypt")
+assert key.startswith("@@") and key.endswith("@@"), f"LUKS key is not a placeholder: {key!r}"
+assert a["identity"]["password"].startswith("@@"), "password hash is not a placeholder"
+for k in a["ssh"]["authorized-keys"]:
+    assert k.startswith("@@"), f"a real SSH key is committed: {k[:40]}"
+assert a["ssh"]["allow-pw"] is False, "password SSH is enabled"
+PY
+then ok "the production profile commits no secret, only placeholders"
+else bad "the production profile carries something that should not be committed"; fi
+
+# The two profiles must not share a credential: the VM's passphrase protects nothing.
+vm_key="$(python3 -c "
+import yaml
+d=yaml.safe_load(open('$SEED'))
+print(next(e['key'] for e in d['autoinstall']['storage']['config'] if e.get('type')=='dm_crypt'))")"
+if grep -qF "$vm_key" "$TB"; then bad "the Tensorbook profile reuses the VM test passphrase"
+else ok "the Tensorbook profile does not reuse the VM test passphrase"; fi
+
+# Disks matched by identity, not by enumeration order.
+if python3 - "$TB" <<'PY'
+import sys, yaml
+d = yaml.safe_load(open(sys.argv[1]))
+disks = [e for e in d["autoinstall"]["storage"]["config"] if e.get("type") == "disk"]
+assert disks, "no disks"
+for e in disks:
+    assert "path" not in e, f"disk {e['id']} is matched by path {e.get('path')}, not identity"
+    assert "match" in e, f"disk {e['id']} has no match directive"
+early = "\n".join(d["autoinstall"]["early-commands"])
+assert "exactly 2 NVMe" in early, "no guard on the number of NVMe disks"
+assert "CDL_EXPECTED_SERIALS" in early, "no optional serial check"
+PY
+then ok "production disks are matched by identity with a count guard"
+else bad "production disks are matched by enumeration order"; fi
 
 printf '\n  test-autoinstall: %d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

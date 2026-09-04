@@ -1,0 +1,132 @@
+#cloud-config
+# Appliance-mode autoinstall profile for the Lambda Tensorbook. See README.md in this
+# directory before using it.
+#
+# THIS FILE IS A TEMPLATE AND WILL NOT INSTALL AS COMMITTED. Two placeholders must be
+# substituted when the install medium is built:
+#
+#   @@CDL_LUKS_PASSPHRASE@@   the disk encryption passphrase
+#   @@CDL_SSH_PUBKEY@@        the public key that will be able to log in
+#
+# The passphrase is not in this repository and must never be committed to it. The repository
+# is public; a committed passphrase is a published passphrase, and rotating a LUKS
+# passphrase after the fact does not un-publish the one the disk was created with.
+#
+# This profile is SEPARATE from scripts/vm/autoinstall/user-data on purpose. That one is a
+# test fixture: 20 GB partitions, virtio disks, and a passphrase written in plain text
+# because it protects nothing. Sharing one file between a test rig and a machine holding
+# real work is how a test credential ends up on the real machine.
+
+autoinstall:
+  version: 1
+
+  kernel:
+    package: linux-generic-hwe-26.04
+
+  locale: en_US.UTF-8
+  keyboard: {layout: us}
+
+  identity:
+    hostname: cdl-box
+    username: cdl
+    password: "@@CDL_PASSWORD_HASH@@"
+
+  ssh:
+    install-server: true
+    allow-pw: false
+    authorized-keys: ["@@CDL_SSH_PUBKEY@@"]
+
+  # Disks are matched by identity, not by enumeration order. /dev/nvme0n1 is whatever the
+  # kernel probed first this boot, and on a two-drive machine the names can swap between
+  # boots. Getting this wrong means installing over the wrong drive.
+  #
+  # The guard in early-commands is the real check: `match` narrows the candidates, and the
+  # guard refuses unless exactly two NVMe devices of the expected size are present. Serial
+  # numbers would be stronger still, but they are hardware identifiers and this repository
+  # is public -- notes/hardware/ is gitignored for the same reason. Set CDL_EXPECTED_SERIALS
+  # on the install medium to check them without committing them.
+  early-commands:
+    - |
+      set -eu
+      expected_size_gb=1000
+      tolerance_gb=100
+
+      mapfile -t nvme < <(lsblk -dn -o NAME,TYPE | awk '$2=="disk" && $1 ~ /^nvme/ {print $1}')
+      if [ "${#nvme[@]}" -ne 2 ]; then
+        echo "FATAL: expected exactly 2 NVMe disks, found ${#nvme[@]}: ${nvme[*]:-none}" >&2
+        echo "  This profile is specific to a two-drive Tensorbook. Refusing to guess." >&2
+        exit 1
+      fi
+
+      for d in "${nvme[@]}"; do
+        bytes=$(blockdev --getsize64 "/dev/$d")
+        gb=$(( bytes / 1000000000 ))
+        if [ "$gb" -lt $(( expected_size_gb - tolerance_gb )) ] || \
+           [ "$gb" -gt $(( expected_size_gb + tolerance_gb )) ]; then
+          echo "FATAL: /dev/$d is ${gb}GB, expected ~${expected_size_gb}GB" >&2
+          exit 1
+        fi
+        echo "ok: /dev/$d ${gb}GB serial=$(lsblk -dn -o SERIAL "/dev/$d")"
+      done
+
+      # Optional stronger check, if the medium carries the expected serials.
+      if [ -n "${CDL_EXPECTED_SERIALS:-}" ]; then
+        for d in "${nvme[@]}"; do
+          s=$(lsblk -dn -o SERIAL "/dev/$d" | tr -d ' ')
+          case " $CDL_EXPECTED_SERIALS " in
+            *" $s "*) ;;
+            *) echo "FATAL: /dev/$d serial $s is not in CDL_EXPECTED_SERIALS" >&2; exit 1 ;;
+          esac
+        done
+      fi
+
+      # THIS ERASES BOTH DRIVES. Everything above exists so that this line runs only on the
+      # machine it was meant for.
+      echo "storage guard passed: ${nvme[*]}"
+
+  storage:
+    config:
+      - {type: disk, id: disk0, ptable: gpt, wipe: superblock-recursive, preserve: false, grub_device: false,
+         match: {ssd: true, size: largest}}
+      - {type: disk, id: disk1, ptable: gpt, wipe: superblock-recursive, preserve: false,
+         match: {ssd: true, size: smallest}}
+
+      - {type: partition, id: p_esp, device: disk0, size: 1G, flag: boot, grub_device: true}
+      - {type: format, id: f_esp, volume: p_esp, fstype: fat32}
+      - {type: mount, id: m_esp, device: f_esp, path: /boot/efi}
+
+      # /boot stays outside the encryption: GRUB must read a kernel before anything can be
+      # unlocked. 4G rather than the VM's 2G, because this machine keeps several kernels
+      # and §11.4 archives /boot into each snapshot.
+      - {type: partition, id: p_boot, device: disk0, size: 4G}
+      - {type: format, id: f_boot, volume: p_boot, fstype: ext4}
+      - {type: mount, id: m_boot, device: f_boot, path: /boot}
+
+      # The remainder of each drive, striped. Sizes are -1 (fill) rather than explicit, so
+      # this does not need editing if the drives are ever replaced with larger ones.
+      - {type: partition, id: p_raid0, device: disk0, size: -1}
+      - {type: partition, id: p_raid1, device: disk1, size: -1}
+
+      - {type: raid, id: md0, name: md0, raidlevel: raid0, devices: [p_raid0, p_raid1]}
+      - {type: dm_crypt, id: crypt0, volume: md0, dm_name: cryptroot, key: "@@CDL_LUKS_PASSPHRASE@@"}
+
+      - {type: format, id: f_root, volume: crypt0, fstype: btrfs}
+      - {type: mount, id: m_root, device: f_root, path: /}
+
+  packages:
+    - mdadm
+    - cryptsetup
+    - cryptsetup-initramfs
+    - btrfs-progs
+    - restic
+    - rclone
+    - openssh-server
+    - smartmontools
+
+  # Reboot rather than power off: unlike the VM harness, this boots from installed media
+  # and does not re-enter the installer.
+  shutdown: reboot
+
+  late-commands:
+    - test -x /run/cdl/migrate-btrfs-root.sh || { echo "medium did not deliver migrate-btrfs-root.sh" >&2; exit 1; }
+    - /run/cdl/migrate-btrfs-root.sh
