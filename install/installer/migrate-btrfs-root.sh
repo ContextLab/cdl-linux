@@ -257,16 +257,29 @@ stage validated
 # remounted above, so curtin's record of what is mounted is stale and its in-target call
 # fails with exit 2. Every subsequent target operation in this installation uses this same
 # helper, so there is one answer to "how do we run something in the target".
+# Skip anything already mounted. `mount --rbind /sys` over an existing /target/sys stacks
+# a second recursive tree on top of the first, and the result cannot be taken down by one
+# `umount -R` -- which is how an install ended with /target/sys nested inside itself and
+# subiquity's own `umount --recursive /target` failing at shutdown.
 for v in proc sys dev dev/pts run; do
     mkdir -p "$TARGET/$v"
+    mountpoint -q "$TARGET/$v" && continue
     mount --rbind "/$v" "$TARGET/$v" 2>/dev/null || mount --bind "/$v" "$TARGET/$v" || die "cannot bind /$v"
 done
 
 chroot "$TARGET" update-grub                 || die "update-grub failed"
 chroot "$TARGET" update-initramfs -u -k all  || die "update-initramfs failed"
 
+# Unmount until it is actually gone, rather than once and hopefully. A stacked recursive
+# bind needs more than one pass, and `|| true` on a single attempt turns "still mounted"
+# into silence -- which is what left /sys behind for the next step to stack onto.
 for v in run dev/pts dev sys proc; do
-    umount -R "$TARGET/$v" 2>/dev/null || true
+    n=0
+    while mountpoint -q "$TARGET/$v" && [ "$n" -lt 10 ]; do
+        umount -R "$TARGET/$v" 2>/dev/null || umount -l "$TARGET/$v" 2>/dev/null || break
+        n=$((n + 1))
+    done
+    mountpoint -q "$TARGET/$v" && log "WARNING: $TARGET/$v is still mounted after $n attempts"
 done
 stage bootloader-rebuilt
 
