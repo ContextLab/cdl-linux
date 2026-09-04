@@ -125,21 +125,33 @@ Source: `notes/reviews/2026-09-02-cdl-box-deep-audit.md`
   still listed open after being answered; §8.3 described write actions after §8.2 declared
   the dashboard read-only; CLI refresh pointed at B4 when acceptance is B6; stale NAS prose.
 
-## Open: an intermittent suite failure, second occurrence
+## CLOSED: the intermittent suite failure, cause found
 
-`tests/run-all.sh` reported `failures: 1` once on 2026-09-03, immediately after rendering the
-whitepaper PDF and while the VM was running. **Not reproduced**: 25 consecutive runs of
-`tests/test-capture-safety.sh` and 8 consecutive full-suite runs were clean, and qemu was
-still running during those, so CPU contention is not obviously the cause either.
+**Reproduced on 2026-09-03 and fixed.** It was a race in
+`tests/test-capture-safety.sh`, not in any product code.
 
-This is the **second** occurrence in this project; the first was recorded in session 03 and
-also did not reproduce. Recording it rather than explaining it: no cause has been established,
-the failing check was not captured because only the summary line was kept, and the honest
-statement is that the suite has failed twice out of many hundreds of runs for reasons unknown.
+The test built a collision path from `date`, wrote a file there, and then ran
+`capture-hardware.sh`, which computes *its own* timestamp. If the clock ticked between the
+two, the script picked a different filename, wrote successfully and exited 0. The exit-code
+assertion then failed.
 
-**The concrete fix available now is to stop losing the evidence.** `run-all.sh` prints which
-check failed but the calling command piped it to `tail -3`. Next occurrence should capture
-the full output.
+**The worse half:** the preceding assertion -- that the existing file was not clobbered --
+**passed vacuously** in exactly that case, because nothing had tried to touch the file it
+was checking. A green line was reported for a case the run never exercised.
+
+**Measured rate:** 1 in 300 attempts with only a `date` call between the two timestamps
+(`/tmp/racetest`, 2026-09-03). The real test launches a script there, so the window is
+wider. That is consistent with two failures in many hundreds of suite runs.
+
+**The fix** starts each attempt just after a second boundary, then confirms the collision
+actually occurred by checking that no new capture file appeared, and retries up to five
+times if the clock won. If it never collides, the suite now **fails loudly as untested**
+rather than asserting anything. 12 consecutive runs clean.
+
+**What made this findable at last** was `run-all.sh` preserving the full output of a
+failing suite to a named file. Both previous occurrences were lost because the caller had
+piped the runner to `tail -3`, so only the count survived. The fix that mattered was to
+the evidence, not to the test.
 
 ## Decisions taken this session
 

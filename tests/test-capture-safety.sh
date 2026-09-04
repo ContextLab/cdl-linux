@@ -59,14 +59,47 @@ produced=$(find notes/hardware -name '*-raw.md' ! -name 'existing-*' | wc -l | t
 check "two runs produce two distinct captures" "2" "$produced"
 
 # The default path must refuse to clobber even on a same-second collision.
-collide="notes/hardware/$(hostname -s 2>/dev/null || echo unknown)-$(date -u +%Y%m%dT%H%M%SZ)-raw.md"
-printf 'SECOND IRREPLACEABLE CAPTURE\n' > "$collide"
-./scripts/capture-hardware.sh >/dev/null 2>&1
-rc=$?
-check "same-second collision refuses rather than clobbering" \
-    "SECOND IRREPLACEABLE CAPTURE" \
-    "$(head -1 "$collide")"
-check "and it signals refusal with a non-zero exit" "1" "$rc"
+#
+# This raced, and the race is the intermittent suite failure recorded twice in the notes.
+# The old version computed the collision path from `date`, then let capture-hardware.sh
+# compute its own. A tick of the clock between the two gave the script a DIFFERENT
+# filename: no collision, a clean write, exit 0. The exit-code assertion then failed, and
+# -- worse -- the clobber assertion PASSED VACUOUSLY, because nothing had tried to touch
+# the file it was checking. A test that reports a pass for a case it never exercised is
+# the more expensive half of this defect.
+#
+# So: start each attempt just after a second boundary, giving the script most of a second
+# of headroom, and then CONFIRM the collision actually occurred by checking that no new
+# capture appeared. If it did not, retry rather than assert anything.
+collided=0
+rc=""
+for _ in 1 2 3 4 5; do
+    boundary="$(date -u +%S)"
+    while [ "$(date -u +%S)" = "$boundary" ]; do sleep 0.05; done
+
+    collide="notes/hardware/$(hostname -s 2>/dev/null || echo unknown)-$(date -u +%Y%m%dT%H%M%SZ)-raw.md"
+    printf 'SECOND IRREPLACEABLE CAPTURE\n' > "$collide"
+
+    before=$(find notes/hardware -name '*-raw.md' | wc -l | tr -d ' ')
+    ./scripts/capture-hardware.sh >/dev/null 2>&1
+    rc=$?
+    after=$(find notes/hardware -name '*-raw.md' | wc -l | tr -d ' ')
+
+    # A collision means the script produced no new file. Anything else and the clock beat
+    # us; that attempt tested nothing.
+    if [ "$before" = "$after" ]; then collided=1; break; fi
+    rm -f "$collide"
+done
+
+if [[ $collided -eq 1 ]]; then
+    pass "a same-second collision was actually provoked"
+    check "same-second collision refuses rather than clobbering" \
+        "SECOND IRREPLACEABLE CAPTURE" \
+        "$(head -1 "$collide")"
+    check "and it signals refusal with a non-zero exit" "1" "$rc"
+else
+    fail "could not provoke a same-second collision in 5 attempts; the refusal is UNTESTED"
+fi
 
 # An explicit path is the caller's to manage, and documented as overwritable.
 printf 'OLD\n' > "$tmp/explicit.md"
