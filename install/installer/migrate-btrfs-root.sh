@@ -169,7 +169,12 @@ stage toplevel-cleared
 fstab="$TOP/@/etc/fstab"
 [ -f "$fstab" ] || die "no /etc/fstab in @ -- the snapshot did not contain the installed system"
 
+# `$1 !~ /^#/` on every rule. Ubuntu's installer writes comment lines of the form
+# "# / was on /dev/vda3 during installation", in which $1 is "#" and $2 is "/", so a rule
+# keyed on $2 alone matches comments as readily as mounts. That is exactly how the /boot
+# remount below came to run `mount '#' /target/boot`.
 awk -v u="$uuid" '
+    $1 ~ /^#/ { print; next }
     $2=="/"           && $3=="btrfs" { next }
     $2=="/home"       && $3=="btrfs" { next }
     $2=="/srv/models" && $3=="btrfs" { next }
@@ -199,8 +204,12 @@ while read -r dev mnt; do
     case "$dev" in
         UUID=*) dev="/dev/disk/by-uuid/${dev#UUID=}" ;;
     esac
+    # A parse that goes wrong should say so here rather than at mount(8), whose message
+    # ("special device # does not exist") describes the symptom and not the cause.
+    [ -b "$dev" ] || die "fstab parse produced '$dev' for $mnt, which is not a block device"
     mount "$dev" "$TARGET$mnt" || die "cannot mount $dev at $TARGET$mnt"
-done < <(awk '$2=="/boot" || $2=="/boot/efi" {print $1, $2}' "$TARGET/etc/fstab" | sort -k2,2)
+done < <(awk '$1 !~ /^#/ && ($2=="/boot" || $2=="/boot/efi") {print $1, $2}' \
+             "$TARGET/etc/fstab" | sort -k2,2)
 
 # ---------------------------------------------------------------- stage: validate
 
