@@ -70,6 +70,7 @@ if grep -q '^UUID=aaaa-bbbb /boot ext4' <<<"$out"
     else bad "the /boot line was altered"; fi
 
 # --- invariants that must be in the script, because getting them wrong is unrecoverable ---
+# shellcheck disable=SC2016  # these are literal needles to grep for, not expansions
 declare -a musts=(
   'refuses when /target is the live root:this is not an installer environment'
   'validates before rebuilding the bootloader:NOT rebuilding the bootloader'
@@ -79,6 +80,17 @@ declare -a musts=(
   'traverses with find, not a shell glob:-mindepth 1 -maxdepth 1'
   'has an EXIT trap:trap cleanup EXIT'
   'records stages on the filesystem:STATE_NAME'
+  # Partial and broken states. These were exercised against a live machine on 2026-09-04
+  # and each behaved correctly, but a manual run is not a test: it does not survive an edit.
+  'recognises a partially completed migration:partially completed migration'
+  'names the state file when refusing:cat /mnt/$STATE_NAME'
+  'offers two recovery routes, not a dead end:delete @ @home @models and re-run'
+  'clears empty leftovers rather than failing:empty leftover subvolumes'
+  'exits 0 when already migrated (re-run):already mounted from @'
+  'checks the filesystem before starting:btrfs filesystem show'
+  'checks free space before starting:refusing'
+  'does not stack a bind over an existing mount:mountpoint -q "$TARGET/$v" && continue'
+  'unmounts until actually free, not once:still mounted after'
 )
 for entry in "${musts[@]}"; do
     desc="${entry%%:*}"; needle="${entry#*:}"
@@ -91,6 +103,18 @@ g_line=$(grep -n 'update-grub' "$S" | grep chroot | cut -d: -f1 | head -1)
 if [ -n "$v_line" ] && [ -n "$g_line" ] && [ "$v_line" -lt "$g_line" ]; then
     ok "the validation gate precedes update-grub"
 else bad "update-grub is not gated by the validation (gate:$v_line grub:$g_line)"; fi
+
+# "Already migrated" must be checked BEFORE the live-system refusal. When it was the other
+# way round, a re-run against an already-migrated filesystem died instead of exiting 0 --
+# which is exactly the case late-commands hit when they run twice, and one of V4's exit
+# criteria. Ordering, not presence, was the defect, so presence alone cannot guard it.
+already_line=$(grep -n 'already mounted from @' "$S" | cut -d: -f1 | head -1)
+live_line=$(grep -n 'this is not an installer environment' "$S" | cut -d: -f1 | head -1)
+if [ -n "$already_line" ] && [ -n "$live_line" ] && [ "$already_line" -lt "$live_line" ]; then
+    ok "the already-migrated check precedes the live-system refusal"
+else
+    bad "check order wrong (already:$already_line live:$live_line); a re-run would die"
+fi
 
 printf '\n  test-migration: %d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

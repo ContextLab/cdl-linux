@@ -20,9 +20,16 @@
 autoinstall:
   version: 1
 
-  # Serial console, so the harness can drive the LUKS prompt on reboot. This is also how
-  # the real machine should be configured: a headless box whose only console is a screen
-  # nobody is sitting at is harder to recover than one that talks to a serial line.
+  # Serial console, so the harness can drive the LUKS prompt on reboot without a display.
+  #
+  # This is a VM convenience, not the design. The real machine is console-first, not
+  # headless (spec §1.3): its own screen is somewhere work happens, and the encrypted root
+  # is unlocked by someone standing at it. The serial line here exists because a test rig
+  # has no one standing at it.
+  #
+  # linux-generic, not linux-generic-hwe-26.04: this is arm64 in QEMU and the HWE track is
+  # the production kernel policy (§2). The profile that installs the real machine is
+  # install/autoinstall/tensorbook.yaml and it pins the HWE kernel.
   kernel:
     package: linux-generic
 
@@ -47,15 +54,15 @@ autoinstall:
     authorized-keys:
       - "@@CDL_VM_PUBKEY@@"
 
-  # ATTEMPT 4. Attempt 3 built the stack in early-commands and handed curtin
-  # `preserve: true`; curtin crashed with "'NoneType' object has no attribute 'size'".
-  # Separately, subiquity is documented to silently drop storage:config:mount:options, so
-  # the `subvol=` mounts would have been ignored even had curtin survived.
+  # Curtin builds the stack the way it supports, and creates NO subvolumes: that question
+  # is settled, not open. Two other routes were measured and both fail -- building the stack
+  # in early-commands and handing curtin `preserve: true` crashes it with "'NoneType' object
+  # has no attribute 'size'", and subiquity silently drops storage:config:mount:options, so
+  # a `subvol=` mount here would be ignored without an error.
   #
-  # So this attempt lets curtin build the stack the way it supports, and asks one question:
-  # does curtin create btrfs subvolumes on its own? Ubuntu's guided btrfs installs use @ and
-  # @home, so the capability exists somewhere; what is unknown is whether an autoinstall
-  # storage config reaches it. The verifier answers that, and it fails if the answer is no.
+  # Root therefore lands in the top-level subvolume, and late-commands migrate it into @,
+  # @home and @models before first boot. Spec §2.1.2 carries the contract;
+  # notes/2026-09-03-storage-experiments.md carries the evidence.
   storage:
     config:
       - {type: disk, id: disk0, path: /dev/vda, ptable: gpt, wipe: superblock-recursive, preserve: false, grub_device: false}
