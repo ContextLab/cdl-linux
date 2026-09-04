@@ -14,7 +14,9 @@ A second motivation may matter more than it sounds, which is that configuring a 
 
 ## What it is
 
-**`cdl-linux` is one install script.** It runs on a stock Ubuntu Server 26.04 machine and turns it into that workstation. The model is Lambda Stack, which is already on this hardware and installs with a single piped command: one line, vanilla Ubuntu, hardware detected, everything configured. We want that experience, and running it twice should change nothing the second time.
+**`cdl-linux` is a reproducible workstation configuration for Ubuntu Server 26.04.** In practice it is one install script, which runs on a stock machine and turns it into that workstation. The model is Lambda Stack, which is already on this hardware and installs with a single piped command: one line, vanilla Ubuntu, hardware detected, everything configured. We want that experience, and running it twice should change nothing the second time.
+
+There are two supported modes. **Portable** runs the script on an existing Ubuntu Server install and leaves storage exactly as it is; it is the mode that works on anyone else's machine. **Appliance** installs Ubuntu from a supplied autoinstall profile first, to get the storage layout below, and is specific to a two-drive Tensorbook. All of the destructive risk in this project lives in the second mode, and the profile is an optional hardware-specific companion rather than a distribution.
 
 It carries four agent CLIs (Claude Code, Codex, Gemini and OpenCode), Ollama and `llama.cpp` for serving models, a CUDA and PyTorch stack for training, Tailscale and SSH for reach, a small web dashboard, and a console configured to be pleasant rather than default.
 
@@ -32,7 +34,7 @@ It matters concretely, because the encrypted root is unlocked by a passphrase ty
 
 ## How the rest works
 
-**Storage.** The two 1 TB NVMe drives are striped into one volume: RAID0, LUKS on top, then btrfs with subvolumes for the system, home and model weights. `/boot` sits outside the encryption because GRUB has to read a kernel before anything can be unlocked. Striping is a deliberate trade (we recommended against it and were overruled for defensible reasons), and the spec records both sides rather than only the conclusion.
+**Storage.** Only in appliance mode. The two 1 TB NVMe drives are striped into one volume: RAID0, LUKS on top, then btrfs with subvolumes for the system, home and model weights. `/boot` sits outside the encryption because GRUB has to read a kernel before anything can be unlocked. Striping is a deliberate trade (we recommended against it and were overruled for defensible reasons), and the spec records both sides rather than only the conclusion.
 
 **Serving models.** Ollama is the endpoint, on a fixed port bound to the Tailscale network, and it is what other devices point at. `llama.cpp` behind `llama-swap` is a second, separate endpoint on localhost for the cases Ollama does not cover. There is no reverse proxy and no unified router, because inventing one is work with no payoff at this scale.
 
@@ -48,7 +50,30 @@ Ordered by how much damage a wrong answer does. We would rather hear about these
 
 **2. Every reboot needs someone at the machine.** The encrypted root is unlocked at the console and there is deliberately no remote unlock, so a power cut on a Friday leaves an unreachable machine until someone drives in (and from outside, an unreachable machine looks identical to a dead one). A UPS would convert the commonest cause into nothing at all, and may be the cheapest available fix. Binding the key to the TPM removes the trip, but means anyone who steals the whole machine and boots it gets the data.
 
-**3. Part of the storage layout cannot be built by the stock installer, and we now know which part.** A VM install settled it: RAID0, LUKS, btrfs, `/boot` outside the encryption and an unlock at the console all work, and the machine boots off the array. What does not work is the subvolumes. Ubuntu's installer puts root in the filesystem's top level and creates none, which costs us the ability to snapshot the system independently of home, and that was the reason for having subvolumes at all. Our answer is to migrate root into a subvolume from the install script afterwards. Moving a live root filesystem is the kind of operation that works until it does not, so it is gated on running in the VM, repeatedly, before it goes near the machine.
+**3. Part of the storage layout cannot be built by the stock installer, and the fix is
+riskier than it first looked.** A VM install settled the easy part: RAID0, LUKS, btrfs,
+`/boot` outside the encryption and an unlock at the console all work, and the machine boots
+off the array. What the installer will not do is create subvolumes; it puts root in the
+filesystem's top level, which costs the ability to snapshot the system independently of
+home, and that was the reason for having subvolumes at all.
+
+An earlier version of this document said the answer was to migrate root into a subvolume
+from the install script afterwards. **That turns out to be impossible**, and finding out
+took two VM cycles: btrfs will not snapshot the top-level subvolume while it is mounted as
+root, and a directory with a filesystem mounted on it cannot be renamed, which rules out
+both obvious methods. The migration now runs during installation, where the filesystem is
+mounted but nothing is executing from it.
+
+Three further attempts failed for reasons none of us would have predicted from the
+documentation: `mv` across a btrfs subvolume is a copy rather than a rename, so it silently
+breaks hardlinks; cloud-init's `write_files` does not reach the installer environment where
+the script has to run; and `/run` is mounted `noexec` there, so a delivered script cannot be
+executed however its permissions are set. Each cost a VM cycle. **On the Tensorbook, the
+first would have cost a reinstall and the second would have left a half-migrated root.**
+
+The honest status is that this path is experimental, and it is gated on running twice from
+clean disks, with a fixture of hidden files, hardlinks, symlinks, awkward filenames and
+multiple owners that has to survive intact, before it goes near a machine with work on it.
 
 **4. Secure Boot here means signed kernel and modules, not verified boot.** Ubuntu's chain validates the shim, GRUB, the kernel and its modules, but the initrd is not validated and `/boot` is unencrypted by necessity. Anyone with physical access can alter what runs before the disk is unlocked. We state this narrowly on purpose, since a security property described more broadly than it holds is worse than one nobody claimed.
 
