@@ -148,8 +148,19 @@ more broadly than it holds is worse than one nobody claimed.
 **The contract.** Curtin creates the md/LUKS/btrfs stack with root initially in the
 top-level subvolume, because curtin cannot create btrfs subvolumes from an autoinstall
 storage config. An installer late-command then migrates the installed target into `@`,
-`@home` and `@models` before first boot. **This path is experimental until V4 passes twice
-from clean disks.**
+`@home` and `@models` before first boot.
+
+**V4 passed on 2026-09-04.** Three consecutive installs from clean disks: migration exit 0
+through all eight stages, the machine boots, LUKS unlocks at the console, `verify.sh`
+reports 21 passed and 0 failed, and the fixture reports 30 passed and 0 failed. The
+refusal paths were exercised on a live machine: an already-migrated target exits 0, a
+non-mountpoint is refused, and a partially migrated filesystem is refused with two
+recovery routes and nothing touched.
+
+**It is still only proven in a VM.** Nine VM runs were needed to get there, and six of the
+nine failures were in the harness or the delivery mechanism rather than in the migration.
+That ratio is the argument for H1 keeping recovery media to hand rather than a reason to
+feel confident.
 
 That is the whole of the normative decision. The measurements behind it -- what the stock
 installer will and will not do, why the migration cannot run on a live system, and how the
@@ -1117,7 +1128,7 @@ destructive storage setup and recovery.
 |-|-|-|
 | ~~**S1**~~ | ~~Does `restic` work against the HF S3 gateway?~~ | ✅ **Done 2026-09-02, and it changed the design** (§10.5). Direct S3 cannot `init`; `restic` over `rclone` passes all seven steps including restore-and-diff and `prune`. `rclone` is now a dependency |
 | ~~**S2**~~ | ~~Rehearse the storage install in a VM~~ | ✅ **Done 2026-09-03.** md/LUKS/btrfs/`/boot`/unlock all work; **curtin creates no subvolumes** (§2.1.2). Superseded by V4 |
-| **V4** | **The subvolume migration, proven** | **Two clean installs from empty disks.** Root on `subvol=/@`; `/home` and `/srv/models` on their subvolumes; SSH key login works after reboot; every fixture entry survives with content, ownership, mode, link count, symlink target, xattrs and ACLs intact; `fstab`, `crypttab`, md assembly, GRUB and initramfs all verify; a second run of the migration recognises the completed state and exits 0; and an injected failure at each stage either recovers or leaves instructions a person can follow |
+| ~~**V4**~~ | ~~The subvolume migration, proven~~ | ✅ **Done 2026-09-04**: three consecutive installs, 21/21 storage checks, 30/30 fixture checks, refusal paths exercised live. Criteria were: **two clean installs from empty disks.** Root on `subvol=/@`; `/home` and `/srv/models` on their subvolumes; SSH key login works after reboot; every fixture entry survives with content, ownership, mode, link count, symlink target, xattrs and ACLs intact; `fstab`, `crypttab`, md assembly, GRUB and initramfs all verify; a second run of the migration recognises the completed state and exits 0; and an injected failure at each stage either recovers or leaves instructions a person can follow |
 | **B0** | **Back up the machine that exists today, and prove the backup is real** | Back up `/home` and `/etc` to the bucket, restore to scratch storage on a *different* machine, and diff. Then build the §10.2 second copy, define its owner, schedule, retention, capacity alert and failure alert, restore **from it**, and record the recovery-point objective. **Record explicitly that T5 is open** -- a write-capable token on the box can erase the bucket -- and that RAID0 is accepted on those terms |
 
 **RAID0 stays blocked until B0 passes.** Striping means either drive failing destroys the
