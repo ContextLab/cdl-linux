@@ -5,7 +5,7 @@
 # so a failure says which claim is wrong rather than only that something is.
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
-# shellcheck source=lib.sh
+# shellcheck source-path=SCRIPTDIR source=lib.sh
 source "$HERE/lib.sh"
 
 require ssh || die "ssh is required"

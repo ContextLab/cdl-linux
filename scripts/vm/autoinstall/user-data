@@ -29,6 +29,10 @@ write_files:
     permissions: "0755"
     encoding: b64
     content: "@@CDL_B64_FIXTURE@@"
+  - path: /run/cdl/fixture-verify.sh
+    permissions: "0755"
+    encoding: b64
+    content: "@@CDL_B64_VERIFY@@"
 
 autoinstall:
   version: 1
@@ -120,6 +124,11 @@ autoinstall:
     # inside a YAML string. This step fails the installation if the script is missing.
     - test -x /run/cdl/migrate-btrfs-root.sh || { echo "seed did not deliver migrate-btrfs-root.sh" >&2; exit 1; }
     - /run/cdl/migrate-btrfs-root.sh
+
+    # The verifier travels with the machine it verifies, next to the manifest it reads, so
+    # checking the migration later needs nothing from this repository.
+    - cp /run/cdl/fixture-verify.sh /target/var/log/cdl/fixture-verify.sh
+    - chmod 0755 /target/var/log/cdl/fixture-verify.sh
 
     # Serial console on the installed system, so a reboot can be driven and observed
     # without a display. This matches the console-first design: the machine's own screen is

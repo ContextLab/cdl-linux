@@ -6,7 +6,7 @@
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 REPO="$(cd "$HERE/../.." && pwd)"
-# shellcheck source=lib.sh
+# shellcheck source-path=SCRIPTDIR source=lib.sh
 source "$HERE/lib.sh"
 
 require qemu-img "$QEMU" hdiutil curl shasum tar || die "install the missing tools first"
@@ -58,13 +58,15 @@ pubkey="$(cat "${VM_KEY}.pub")"
 b64() { base64 < "$1" | tr -d '\n'; }
 migrate_b64="$(b64 "$REPO/install/installer/migrate-btrfs-root.sh")"
 fixture_b64="$(b64 "$HERE/fixture/create.sh")"
+verify_b64="$(b64 "$HERE/fixture/verify.sh")"
 
 sed -e "s|@@CDL_VM_PUBKEY@@|${pubkey}|" \
     -e "s|@@CDL_B64_MIGRATE@@|${migrate_b64}|" \
     -e "s|@@CDL_B64_FIXTURE@@|${fixture_b64}|" \
+    -e "s|@@CDL_B64_VERIFY@@|${verify_b64}|" \
     "$HERE/autoinstall/user-data" > "$seed_dir/user-data"
 
-for ph in CDL_VM_PUBKEY CDL_B64_MIGRATE CDL_B64_FIXTURE; do
+for ph in CDL_VM_PUBKEY CDL_B64_MIGRATE CDL_B64_FIXTURE CDL_B64_VERIFY; do
     grep -q "@@${ph}@@" "$seed_dir/user-data" && die "substitution failed for ${ph}"
 done
 

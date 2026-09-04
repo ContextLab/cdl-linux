@@ -156,11 +156,29 @@ subvolumes, move the top level into `@`, move home directories into `@home`, rew
 `fstab` curtin has already written, remount `/target` from `@`, and rebuild GRUB and the
 initramfs.
 
-**That last step needs an explicitly built chroot, not `curtin in-target`.** Unmounting and
-remounting `/target` by hand leaves curtin's record of what is mounted stale, and
-`curtin in-target -- update-grub` then fails with exit 2 and takes the install down. The
-block bind-mounts `proc`, `sys`, `dev`, `dev/pts` and `run` and calls `chroot` directly, so
-everything that knows about this remount is in one place.
+**The step after the migration uses an explicitly built chroot, not `curtin in-target`.**
+The reason given here in an earlier draft was that remounting `/target` by hand leaves
+curtin's mount bookkeeping stale, making `curtin in-target -- update-grub` fail with exit 2.
+**That explanation was asserted, not measured, and it should not have been written as
+fact.** A later run replaced curtin with an explicit chroot and failed with exit 2 again --
+but from `awk`, several lines earlier, reading an fstab path under a directory the script
+had just unmounted. It never reached `update-grub`, so it says nothing either way about
+curtin. The curtin diagnosis is untested and is recorded here as an open question, not a
+finding.
+
+The chroot is used regardless, for a reason that does not depend on that question: the
+migration remounts `/target`, and having one helper for every target operation means there
+is a single answer to "how do we run something in the target" rather than two that must be
+kept in agreement.
+
+**The defect that run did find is worth more than the one it was looking for.** With
+`set -e`, an `awk` that cannot open its input exits 2 and takes the whole installation down
+with a message that names the entire script rather than the line. Nothing was written to the
+target, the installer stopped at an interactive `Press enter to start a shell`, and the
+`set -x` trace went to the guest's journal, which is unreachable from the harness. That is
+the concrete argument for §2.1.4: a destructive procedure needs recorded stages on the
+filesystem, because the failure that matters is the one that leaves you unable to ask what
+happened.
 
 **Consequence for §1.2:** the fresh-machine path is now the *only* path that produces the
 subvolume layout. Running `install.sh` on an existing machine cannot add it, and the module

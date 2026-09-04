@@ -10,7 +10,7 @@
 # They are never written to the guest's disk.
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
-# shellcheck source=lib.sh
+# shellcheck source-path=SCRIPTDIR source=lib.sh
 source "$HERE/lib.sh"
 
 BUCKET="${CDL_TEST_BUCKET:-cdl-vm-backup-test}"
