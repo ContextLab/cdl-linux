@@ -139,10 +139,23 @@ autoinstall:
       test -s /run/cdl/migrate-btrfs-root.sh || { echo "medium did not deliver the migration script" >&2; exit 1; }
     - |
       set -eu
-      mkdir -p /target/var/log/cdl
-      # `bash <path>`, not direct execution: /run is noexec in the installer and a
-      # decoded script there exits 126 regardless of its mode bits.
+      # The migration's log must reach the harness even when the migration fails, and
+      # /target is NOT the place for it: the script unmounts /target early, so after an
+      # early failure that path is the installer's own filesystem rather than the disk.
+      # /dev/console is the serial line install.sh is already capturing, so this is the one
+      # sink that survives every failure mode of the thing it is reporting on.
+      #
+      # No pipe to `tee`: late-commands run under `sh`, where PIPESTATUS does not exist, so
+      # a pipeline would report tee's status and a failed migration would look like a
+      # successful install. Redirect, then print, then propagate.
       if bash /run/cdl/migrate-btrfs-root.sh > /tmp/cdl-migration.log 2>&1; then rc=0; else rc=$?; fi
-      cat /tmp/cdl-migration.log
-      cp /tmp/cdl-migration.log /target/var/log/cdl/migration-run.log 2>/dev/null || true
+      {
+        echo "=== CDL MIGRATION LOG (exit $rc) ==="
+        cat /tmp/cdl-migration.log
+        echo "=== END CDL MIGRATION LOG ==="
+      } > /dev/console 2>&1 || cat /tmp/cdl-migration.log
+      if [ "$rc" -eq 0 ]; then
+        mkdir -p /target/var/log/cdl
+        cp /tmp/cdl-migration.log /target/var/log/cdl/migration-run.log 2>/dev/null || true
+      fi
       exit "$rc"

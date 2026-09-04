@@ -17,6 +17,13 @@
 
 set -euo pipefail
 
+# Trace every command, with the line number, into whatever is capturing stderr. This is an
+# installer step that runs once, unattended, on a filesystem nobody can inspect afterwards
+# if it goes wrong -- the run that motivated this failed with exit 1 and no way to ask which
+# line produced it. Verbosity is the cheap half of a destructive procedure.
+PS4='+ ${BASH_SOURCE##*/}:${LINENO}: '
+set -x
+
 TARGET="${TARGET:-/target}"
 TOP="${TOP:-/tmp/cdl-top}"
 STATE_NAME=".cdl-migration-state"
