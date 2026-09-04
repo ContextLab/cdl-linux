@@ -203,3 +203,23 @@ autoinstall:
       chroot /target sh -c 'cat /proc/mdstat > /var/log/cdl/mdstat.txt 2>&1 || true'
       chroot /target sh -c 'lsinitramfs /boot/initrd.img-$(ls /lib/modules | head -1) 2>/dev/null | grep -cE "cryptsetup|md" > /var/log/cdl/initramfs-bits.txt 2>&1 || true'
       chroot /target sh -c 'btrfs subvolume list / > /var/log/cdl/subvolumes.txt 2>&1 || echo NONE > /var/log/cdl/subvolumes.txt'
+
+    # Hand /target back in the state subiquity expects to find it.
+    #
+    # subiquity's shutdown runs `umount --recursive /target` and it was failing with exit
+    # 32, which reports the install as failed after everything has actually worked. The
+    # submounts here were created by this file rather than by curtin, so rather than reason
+    # about whose bookkeeping is stale, this unmounts them explicitly, deepest first, and
+    # prints what is left to the console so a future failure names itself instead of
+    # needing another install to diagnose.
+    - |
+      set -ux
+      sync
+      for m in /target/boot/efi /target/boot /target/srv/models /target/home; do
+        mountpoint -q "$m" && umount "$m" || true
+      done
+      echo "=== MOUNTS REMAINING UNDER /target ===" > /dev/console 2>&1 || true
+      findmnt -R /target > /dev/console 2>&1 || true
+      fuser -vm /target > /dev/console 2>&1 || true
+      echo "=== END MOUNTS ===" > /dev/console 2>&1 || true
+      exit 0

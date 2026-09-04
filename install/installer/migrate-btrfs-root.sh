@@ -56,13 +56,27 @@ trap cleanup EXIT
 
 [ "$(id -u)" -eq 0 ] || die "must run as root"
 
-# Refuse to run against a live system. /target is the installer's mountpoint; if the thing
-# we are about to rearrange is also our own root, we are not in an installer.
+
+mountpoint -q "$TARGET" || die "$TARGET is not a mountpoint"
+
+# ORDER MATTERS HERE. "Already migrated" is checked BEFORE the live-system refusal, because
+# it is safe wherever it is true: if root is already on @ there is nothing to do and
+# nothing to damage, so exit 0 regardless of what kind of machine this is. Checking the
+# refusal first made a re-run against an already-migrated filesystem die instead of
+# succeeding, which is the case late-commands hit when they run twice.
+cur_opts="$(findmnt -no OPTIONS "$TARGET")"
+case "$cur_opts" in
+    *subvol=/@,*|*subvol=/@|*subvol=@,*|*subvol=@)
+        log "already mounted from @; nothing to do"
+        exit 0
+        ;;
+esac
+
+# Now refuse to run against a live system. /target is the installer's mountpoint; if the
+# thing we are about to rearrange is also our own root, we are not in an installer.
 if [ "$(findmnt -no SOURCE / 2>/dev/null || true)" = "$(findmnt -no SOURCE "$TARGET" 2>/dev/null || true)" ]; then
     die "$TARGET and / are the same filesystem -- this is not an installer environment"
 fi
-
-mountpoint -q "$TARGET" || die "$TARGET is not a mountpoint"
 
 root_dev="$(findmnt -no SOURCE "$TARGET")"
 root_dev="${root_dev%%\[*}"          # strip any [/subvol] suffix
@@ -72,15 +86,6 @@ root_dev="${root_dev%%\[*}"          # strip any [/subvol] suffix
 
 uuid="$(blkid -s UUID -o value "$root_dev")" || die "no UUID for $root_dev"
 [ -n "$uuid" ] || die "empty UUID for $root_dev"
-
-# Already migrated? That is a success, not an error: late-commands can be re-run.
-cur_opts="$(findmnt -no OPTIONS "$TARGET")"
-case "$cur_opts" in
-    *subvol=/@,*|*subvol=/@|*subvol=@,*|*subvol=@)
-        log "already mounted from @; nothing to do"
-        exit 0
-        ;;
-esac
 
 # Filesystem health and space. The snapshot itself is free, but the two cp -a moves are not
 # bounded by it, so refuse to start without room to fail safely.
