@@ -43,7 +43,7 @@ step "verify the migration fixture"
 # The manifest was recorded in the installer, before the migration. This compares the same
 # measurements on the booted system, so a lost dotfile, a broken hardlink or a dropped
 # xattr is a failure rather than something nobody looked at.
-./scripts/vm/run-in-guest.sh /var/log/cdl/fixture-verify.sh || fatal "fixture verification failed"
+./scripts/vm/run-in-guest.sh bash /var/log/cdl/fixture-verify.sh || fatal "fixture verification failed"
 
 step "backup round trip"
 ./scripts/vm/test-backup.sh || fatal "backup round trip failed"

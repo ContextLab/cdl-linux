@@ -107,15 +107,20 @@ autoinstall:
       printf %s '@@CDL_B64_MIGRATE@@' | base64 -d > /run/cdl/migrate-btrfs-root.sh
       printf %s '@@CDL_B64_FIXTURE@@' | base64 -d > /run/cdl/fixture-create.sh
       printf %s '@@CDL_B64_VERIFY@@'  | base64 -d > /run/cdl/fixture-verify.sh
-      chmod 0755 /run/cdl/*.sh
+      chmod 0755 /run/cdl/*.sh 2>/dev/null || true
       for f in migrate-btrfs-root fixture-create fixture-verify; do
         test -s "/run/cdl/$f.sh" || { echo "seed did not deliver $f.sh" >&2; exit 1; }
+        bash -n "/run/cdl/$f.sh"  || { echo "$f.sh did not survive base64 transit" >&2; exit 1; }
       done
 
     # Test fixture FIRST, so the migration has real hidden files, hardlinks, symlinks,
     # awkward names, multiple owners and model weights to preserve, and so the manifest it
     # records is a measurement of the pre-migration state rather than a restated intent.
-    - /run/cdl/fixture-create.sh
+      # Invoked as `bash <path>`, never executed directly. /run is mounted noexec in the
+      # installer environment, so a decoded-and-chmod'd script there exits 126 ("found but
+      # not executable") no matter what its mode bits say. Handing the file to the
+      # interpreter reads it rather than exec'ing it, which noexec does not prevent.
+    - bash /run/cdl/fixture-create.sh
 
     # Migrate root into @ and split out @home and @models. The procedure lives in
     # install/installer/migrate-btrfs-root.sh, not in this file: it is destructive, it needs
@@ -131,7 +136,7 @@ autoinstall:
       # No pipe to `tee`: late-commands run under `sh`, where PIPESTATUS does not exist,
       # so a pipeline would report tee's status and a failed migration would look like a
       # successful install. Redirect, then print, then propagate.
-      if /run/cdl/migrate-btrfs-root.sh > /tmp/cdl-migration.log 2>&1; then rc=0; else rc=$?; fi
+      if bash /run/cdl/migrate-btrfs-root.sh > /tmp/cdl-migration.log 2>&1; then rc=0; else rc=$?; fi
       cat /tmp/cdl-migration.log
       cp /tmp/cdl-migration.log /target/var/log/cdl/migration-run.log 2>/dev/null || true
       exit "$rc"

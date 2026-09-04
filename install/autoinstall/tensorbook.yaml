@@ -135,12 +135,14 @@ autoinstall:
       set -eu
       mkdir -p /run/cdl
       printf %s '@@CDL_B64_MIGRATE@@' | base64 -d > /run/cdl/migrate-btrfs-root.sh
-      chmod 0755 /run/cdl/migrate-btrfs-root.sh
+      chmod 0755 /run/cdl/migrate-btrfs-root.sh 2>/dev/null || true
       test -s /run/cdl/migrate-btrfs-root.sh || { echo "medium did not deliver the migration script" >&2; exit 1; }
     - |
       set -eu
       mkdir -p /target/var/log/cdl
-      if /run/cdl/migrate-btrfs-root.sh > /tmp/cdl-migration.log 2>&1; then rc=0; else rc=$?; fi
+      # `bash <path>`, not direct execution: /run is noexec in the installer and a
+      # decoded script there exits 126 regardless of its mode bits.
+      if bash /run/cdl/migrate-btrfs-root.sh > /tmp/cdl-migration.log 2>&1; then rc=0; else rc=$?; fi
       cat /tmp/cdl-migration.log
       cp /tmp/cdl-migration.log /target/var/log/cdl/migration-run.log 2>/dev/null || true
       exit "$rc"

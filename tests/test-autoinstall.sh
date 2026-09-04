@@ -82,6 +82,11 @@ assert "base64 -d" in cmds, "no base64 decode step"
 # Match the expansion, not the word: the file explains in a comment why this bashism is
 # not used, and an assertion that cannot tell use from mention forbids documenting it.
 assert "${PIPESTATUS" not in cmds, "PIPESTATUS is expanded; late-commands run under sh"
+# /run is noexec in the installer: a decoded script executed directly exits 126 whatever
+# its mode bits say. Every delivered script must be handed to an interpreter instead.
+for script in ("fixture-create.sh", "migrate-btrfs-root.sh"):
+    assert f"bash /run/cdl/{script}" in cmds, f"{script} is executed directly; /run is noexec"
+    assert f"\n    - /run/cdl/{script}" not in cmds, f"{script} still invoked directly"
 PY
 then ok "scripts are delivered by base64 decode, not write_files"
 else bad "script delivery mechanism is wrong"; fi
