@@ -67,25 +67,24 @@ PY
 if python3 "$V" "$work/dangling.yaml" >/dev/null 2>&1; then bad "a dangling storage reference was accepted"
 else ok "a dangling storage reference is refused"; fi
 
-# --- the seed delivers the scripts, and they round-trip byte-identically ---
-if python3 - "$SEED" "$repo" <<'PY'
+# --- the seed delivers the scripts, by a mechanism that actually reaches the installer ---
+# cloud-init write_files was tried and does NOT reach subiquity's late-commands environment:
+# the files were absent and the guards fired. Delivery is base64 decoded in late-commands.
+if python3 - "$SEED" <<'PY'
 import sys, yaml
-seed, repo = sys.argv[1], sys.argv[2]
-d = yaml.safe_load(open(seed))
-want = {
-    "/run/cdl/migrate-btrfs-root.sh": repo + "/install/installer/migrate-btrfs-root.sh",
-    "/run/cdl/fixture-create.sh":     repo + "/scripts/vm/fixture/create.sh",
-    "/run/cdl/fixture-verify.sh":     repo + "/scripts/vm/fixture/verify.sh",
-    "/run/cdl/fixture-verify.sh":     repo + "/scripts/vm/fixture/verify.sh",
-}
-got = {f["path"] for f in d.get("write_files", [])}
-assert got == set(want), f"seed delivers {got}, expected {set(want)}"
-for f in d["write_files"]:
-    assert f["encoding"] == "b64", f["path"]
-    assert f["content"].startswith("@@"), f"{f['path']} is not a placeholder in the committed seed"
+d = yaml.safe_load(open(sys.argv[1]))
+assert "write_files" not in d, "write_files does not reach the installer; do not use it"
+cmds = "\n".join(c if isinstance(c, str) else " ".join(c)
+                  for c in d["autoinstall"]["late-commands"])
+for ph in ("@@CDL_B64_MIGRATE@@", "@@CDL_B64_FIXTURE@@", "@@CDL_B64_VERIFY@@"):
+    assert ph in cmds, f"{ph} is not substituted into late-commands"
+assert "base64 -d" in cmds, "no base64 decode step"
+# Match the expansion, not the word: the file explains in a comment why this bashism is
+# not used, and an assertion that cannot tell use from mention forbids documenting it.
+assert "${PIPESTATUS" not in cmds, "PIPESTATUS is expanded; late-commands run under sh"
 PY
-then ok "the seed declares both installer scripts as base64 placeholders"
-else bad "seed write_files do not match the repository scripts"; fi
+then ok "scripts are delivered by base64 decode, not write_files"
+else bad "script delivery mechanism is wrong"; fi
 
 # --- every late-command that needs a delivered script checks for it ---
 if python3 - "$SEED" <<'PY'
@@ -93,8 +92,7 @@ import sys, yaml
 d = yaml.safe_load(open(sys.argv[1]))
 cmds = [c if isinstance(c, str) else " ".join(c) for c in d["autoinstall"]["late-commands"]]
 joined = "\n".join(cmds)
-for script in ("fixture-create.sh", "migrate-btrfs-root.sh"):
-    assert f"test -x /run/cdl/{script}" in joined, f"no existence check for {script}"
+assert "seed did not deliver" in joined, "no guard on undelivered scripts"
 assert "curtin in-target" not in joined, "curtin in-target is used after the remount"
 PY
 then ok "late-commands check for delivered scripts and never use curtin in-target"

@@ -128,5 +128,19 @@ autoinstall:
   shutdown: reboot
 
   late-commands:
-    - test -x /run/cdl/migrate-btrfs-root.sh || { echo "medium did not deliver migrate-btrfs-root.sh" >&2; exit 1; }
-    - /run/cdl/migrate-btrfs-root.sh
+    # The migration script is decoded from base64 substituted onto the medium, not
+    # delivered by cloud-init write_files -- write_files was measured not to reach
+    # subiquity's late-commands environment. See install/autoinstall/README.md.
+    - |
+      set -eu
+      mkdir -p /run/cdl
+      printf %s '@@CDL_B64_MIGRATE@@' | base64 -d > /run/cdl/migrate-btrfs-root.sh
+      chmod 0755 /run/cdl/migrate-btrfs-root.sh
+      test -s /run/cdl/migrate-btrfs-root.sh || { echo "medium did not deliver the migration script" >&2; exit 1; }
+    - |
+      set -eu
+      mkdir -p /target/var/log/cdl
+      if /run/cdl/migrate-btrfs-root.sh > /tmp/cdl-migration.log 2>&1; then rc=0; else rc=$?; fi
+      cat /tmp/cdl-migration.log
+      cp /tmp/cdl-migration.log /target/var/log/cdl/migration-run.log 2>/dev/null || true
+      exit "$rc"

@@ -16,23 +16,6 @@
 # but wastes the difference, and an accidental mismatch is the kind of thing that is
 # invisible until someone wonders where the space went.
 
-# The installer-side scripts, delivered as base64 so that no YAML indentation rule can
-# corrupt them and so that the copies in this seed are byte-identical to the files in the
-# repository. scripts/vm/install.sh substitutes them at seed-build time; the files
-# themselves are the single source of truth and are shellcheck'd by the test suite.
-write_files:
-  - path: /run/cdl/migrate-btrfs-root.sh
-    permissions: "0755"
-    encoding: b64
-    content: "@@CDL_B64_MIGRATE@@"
-  - path: /run/cdl/fixture-create.sh
-    permissions: "0755"
-    encoding: b64
-    content: "@@CDL_B64_FIXTURE@@"
-  - path: /run/cdl/fixture-verify.sh
-    permissions: "0755"
-    encoding: b64
-    content: "@@CDL_B64_VERIFY@@"
 
 autoinstall:
   version: 1
@@ -112,18 +95,46 @@ autoinstall:
   shutdown: poweroff
 
   late-commands:
+    # Deliver the installer-side scripts by decoding base64 here, NOT via cloud-init's
+    # write_files. write_files was tried first and does not reach this environment: the
+    # files were absent and every guard below fired. Decoding in late-commands depends on
+    # no cloud-init module and no YAML indentation rule, and scripts/vm/install.sh
+    # substitutes the payloads from the repository files at seed-build time, so those files
+    # remain the single source of truth.
+    - |
+      set -eu
+      mkdir -p /run/cdl
+      printf %s '@@CDL_B64_MIGRATE@@' | base64 -d > /run/cdl/migrate-btrfs-root.sh
+      printf %s '@@CDL_B64_FIXTURE@@' | base64 -d > /run/cdl/fixture-create.sh
+      printf %s '@@CDL_B64_VERIFY@@'  | base64 -d > /run/cdl/fixture-verify.sh
+      chmod 0755 /run/cdl/*.sh
+      for f in migrate-btrfs-root fixture-create fixture-verify; do
+        test -s "/run/cdl/$f.sh" || { echo "seed did not deliver $f.sh" >&2; exit 1; }
+      done
+
     # Test fixture FIRST, so the migration has real hidden files, hardlinks, symlinks,
     # awkward names, multiple owners and model weights to preserve, and so the manifest it
     # records is a measurement of the pre-migration state rather than a restated intent.
-    - test -x /run/cdl/fixture-create.sh || { echo "seed did not deliver fixture-create.sh" >&2; exit 1; }
     - /run/cdl/fixture-create.sh
 
     # Migrate root into @ and split out @home and @models. The procedure lives in
     # install/installer/migrate-btrfs-root.sh, not in this file: it is destructive, it needs
     # stages and traps and a partial-run check, and none of that can be written or tested
-    # inside a YAML string. This step fails the installation if the script is missing.
-    - test -x /run/cdl/migrate-btrfs-root.sh || { echo "seed did not deliver migrate-btrfs-root.sh" >&2; exit 1; }
-    - /run/cdl/migrate-btrfs-root.sh
+    # inside a YAML string.
+    #
+    # Its own log goes to the journal, which the harness cannot read, so it is teed to the
+    # target as well. A destructive step whose only account of itself is unreachable is the
+    # failure mode this whole restructuring exists to remove.
+    - |
+      set -eu
+      mkdir -p /target/var/log/cdl
+      # No pipe to `tee`: late-commands run under `sh`, where PIPESTATUS does not exist,
+      # so a pipeline would report tee's status and a failed migration would look like a
+      # successful install. Redirect, then print, then propagate.
+      if /run/cdl/migrate-btrfs-root.sh > /tmp/cdl-migration.log 2>&1; then rc=0; else rc=$?; fi
+      cat /tmp/cdl-migration.log
+      cp /tmp/cdl-migration.log /target/var/log/cdl/migration-run.log 2>/dev/null || true
+      exit "$rc"
 
     # The verifier travels with the machine it verifies, next to the manifest it reads, so
     # checking the migration later needs nothing from this repository.
