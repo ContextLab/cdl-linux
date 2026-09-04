@@ -305,6 +305,71 @@ that leaves a machine in a state nobody has tested. The recovery path for "I do 
 this any more" is reinstalling Ubuntu, which on this design is a documented procedure
 rather than a disaster.
 
+### 3.3 When a module fails
+
+Not supporting uninstall is not a reason to leave a failed run undiagnosable, and these are
+different problems: a failed module is the common case, and reinstalling Ubuntu is an absurd
+answer to it.
+
+A failed module stops the run. Modules after it do **not** execute, because continuing past
+one builds on a state the script cannot describe. What the operator has afterwards:
+
+| | |
+|-|-|
+| **What ran** | `/var/log/cdl/install-runs.jsonl`, one JSON object per module with its result and exit status. The run's own summary counts `ok`, `skipped`, `failed` and `did not run` |
+| **What changed** | Every file a module edits is copied to `<file>.cdl-backup-<run-id>` first, so the previous content is beside the original |
+| **What to do** | Fix the cause and run `sudo ./install.sh --module <name>`. Modules are idempotent, so re-running the whole script is equally safe |
+| **What not to do** | Skip the module and continue. If a module is genuinely inapplicable it should exit 2, which the run records as `skipped` rather than `failed` |
+
+The failure message names the exact re-run command, because a person reading it has just
+had something go wrong and should not also have to work out the syntax.
+
+### 3.4 Services run as their own users, and are hardened the same way
+
+§1.4 says this machine is not multi-user, meaning one supported human operator. That is not
+the same as everything running as one account, and the spec has so far implied the
+distinction without stating it.
+
+Every long-running service gets its own system account with no login shell and no home
+worth having:
+
+| Service | User | Owns |
+|-|-|-|
+| Ollama | `ollama` | `/srv/models/ollama`, read-write |
+| `llama-swap` / `llama-server` | `llama` | `/srv/models/gguf`, **read-only** |
+| Dashboard | `cdl-dash` | nothing; it reads through the interfaces in §8.1 |
+
+`/srv/models` is group-readable by a `models` group that all three join, so weights are
+shared without any service being able to modify another's. The dashboard being unable to
+write anything is the enforcement behind §8.2's read-only claim -- a promise in prose that
+the process could break is not a control.
+
+Each unit carries the same hardening block, and the reason for each line is that it is cheap
+here rather than that it is fashionable:
+
+```ini
+NoNewPrivileges=true          # no setuid escalation from a compromised model server
+PrivateTmp=true               # a scratch file cannot be read by another service
+ProtectSystem=strict          # / is read-only; only ReadWritePaths are not
+ProtectHome=true              # /home is invisible: no service has business there
+ReadWritePaths=/srv/models/…  # exactly one directory, named per service
+ProtectKernelTunables=true
+ProtectKernelModules=true     # nothing here loads a module
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictNamespaces=true
+LockPersonality=true
+MemoryDenyWriteExecute=false  # false, deliberately: JIT and CUDA need W+X and would break
+```
+
+**`MemoryDenyWriteExecute` is off on purpose**, and it is listed rather than omitted so that
+nobody adds it later assuming it was an oversight. CUDA and the JIT paths in these servers
+map writable-executable memory, and enabling it makes them fail at load with an error that
+does not mention systemd.
+
+The GPU needs `/dev/nvidia*`, so `PrivateDevices` is not set for the model servers; the
+dashboard, which touches no device, sets it.
+
 ## 4. Agent CLIs
 
 Four, behind a thin wrapper that supplies each one's environment per process:
@@ -629,6 +694,19 @@ too, so it would capture `scp`, `rsync`, `git` over SSH, and any automation, all
 expect a clean stdin and a clean stdout. It would also fire on the recovery session someone
 is using precisely because the normal path is broken.
 
+**So how does anyone find `cdl`?** Saying where it must not go leaves the actual mechanism
+unstated, and "type `cdl`" is not discoverable on a machine used every few weeks.
+
+| Where | What |
+|-|-|
+| The login banner | `/etc/issue` on tty1 carries the logo and one line: the machine's name, and `cdl` as the way in |
+| After login | `/etc/motd.d/10-cdl` prints a two-line status -- services up, GPU state -- and names `cdl`. `motd.d` runs on interactive login only, which is the property `.profile` lacks |
+| The shell | An alias is not enough; `cdl` is a real executable in `/usr/local/bin`, so `scp`, `rsync` and `ssh host cdl ...` all behave |
+
+The distinction that matters: `motd.d` and `/etc/issue` are **displayed** on interactive
+login, while `.profile` is **executed** on every shell including non-interactive ones. A
+banner that mentions a command cannot capture a `git push`; a launcher that runs can.
+
 **There is no autologin.** The disk was just unlocked by someone standing at the machine,
 which authenticates the disk rather than the person, and the machine is in an office rather
 than a locked room.
@@ -658,8 +736,14 @@ choice made with the information needed to make it.
 
 Session logs (§4.2) capture everything an agent printed, which includes source code,
 prompts, and anything a tool echoed. They are therefore mode 0600, under
-`~/.local/state/cdl/sessions/`, **excluded from the backup by default**, and rotated on
-§11.1's schedule.
+`~/.local/state/cdl/sessions/`, and rotated on §11.1's schedule.
+
+**They are excluded from every backup set, not merely the default one**, and the exclusion
+lives in `restic`'s exclude file rather than in the arguments of one invocation. "Excluded
+by default" was the earlier wording and it was ambiguous in the direction that costs
+something: it reads as though a fuller backup would include them, which would put prompts
+and source code in a bucket whose deletion protections §10.2 already describes as
+incomplete. If a transcript is ever worth keeping, it gets copied somewhere deliberately.
 
 `zellij`'s own session resurrection is **disabled**, because a pane's contents surviving a
 reboot in a cache directory is a copy of the same material with none of the same care.
@@ -731,6 +815,16 @@ font we use the packaged original and let fontconfig fall back to the symbols-on
 the glyph ranges it lacks. That keeps the licensing simple (both are SIL OFL, so a public
 repo can carry the configuration without carrying the fonts) and keeps Fira Code updatable
 through `apt`.
+
+**None of this is confirmed on the actual panel, and it is a spike rather than a plan.**
+`kmscon` renders through DRM, and the Tensorbook's console is driven by the Intel iGPU with
+an NVIDIA GPU also present. Two things are unverified: that `kmscon` starts at all against
+`i915` on this machine with the NVIDIA driver loaded, and that shaping actually produces
+ligatures at the console rather than merely rendering the font. **Spike S4** answers both
+before P1 depends on them: install `kmscon`, start it on tty1, display a line containing
+`=>`, `!=` and `->`, and photograph the screen. If it fails, the console keeps the kernel VT
+and loses ligatures, which is a cosmetic loss rather than a design change -- §9.2's recovery
+terminal is a kernel VT for exactly this reason.
 
 ### 9.7 The CDL palette, and the logo
 
@@ -983,6 +1077,13 @@ upgrade, retained for 30 days. Rolling back is a boot-time subvolume swap. **Thi
 substitute for backup** (§10): the snapshots live on the same striped array that a drive
 failure destroys.
 
+**The `/boot` archive mechanism below is experimental until B7a passes, and is labelled so
+here rather than only in §12.** Restoring `/boot` alongside a subvolume swap is a
+destructive transaction across two resources that cannot be made atomic: the subvolume swap
+and the `/boot` restore either both happen or the machine boots a kernel whose modules are
+missing. Until it has been exercised across a real kernel change, treat rollback as a thing
+to attempt with recovery media to hand, not as a routine undo.
+
 **A snapshot of `@` alone is inconsistent across a kernel change, and that has to be handled
 rather than discovered.** `/boot` is a separate ext4 partition (§2.1) and is not part of any
 btrfs snapshot. So rolling `@` back to before a kernel upgrade restores the old
@@ -1002,39 +1103,57 @@ rather than a rollback in general.
 ## 12. Build order
 
 Each milestone has an exit test, not a judgement, except where a judgement is the point and
-is labelled as one. **Two spikes and one preflight come before anything destructive.**
+is labelled as one. **Nothing destructive happens until V4 and B0 both pass.**
 
-### The preflight, which must finish before either NVMe is touched
+The shortest sensible path: **prove V4 → establish the protected backup → build the
+installer framework → plain console plus SSH → install the Tensorbook → use it for several
+days → add NVIDIA and workloads one at a time.** That keeps the "stock Ubuntu plus a
+script" simplicity while protecting the two places where the simplicity ends, which are
+destructive storage setup and recovery.
 
-| # | Item | Exit test |
+### Before either NVMe is touched
+
+| # | Milestone | Exit test |
 |-|-|-|
 | ~~**S1**~~ | ~~Does `restic` work against the HF S3 gateway?~~ | ✅ **Done 2026-09-02, and it changed the design** (§10.5). Direct S3 cannot `init`; `restic` over `rclone` passes all seven steps including restore-and-diff and `prune`. `rclone` is now a dependency |
-| **B0** | **Back up the machine that exists today, and prove the backup is real** | The Tensorbook currently holds work. Before repartitioning: back up `/home` and `/etc` to the bucket, restore to scratch storage on a *different* machine, and diff. Then set up the §10.2 second copy and confirm it pulls. **Record explicitly that T5 is open** (a write-capable token on the box can erase the bucket) and that RAID0 is being accepted on those terms |
-| **S2** | **Rehearse the storage install in a disposable VM** | Two full installs from `scripts/vm/autoinstall/user-data`, the second reproducing the first. Records partitioning and EFI layout, `mdadm` assembly during early boot, LUKS creation and unlock, subvolume creation, `/etc/crypttab`, `/etc/fstab`, initramfs contents, and behaviour when one array member is absent. **In progress; it has already found that the layout in §2.1 may not be expressible in a stock autoinstall (§2.1.2), which is the kind of thing this spike exists to find before a disk is touched** |
+| ~~**S2**~~ | ~~Rehearse the storage install in a VM~~ | ✅ **Done 2026-09-03.** md/LUKS/btrfs/`/boot`/unlock all work; **curtin creates no subvolumes** (§2.1.2). Superseded by V4 |
+| **V4** | **The subvolume migration, proven** | **Two clean installs from empty disks.** Root on `subvol=/@`; `/home` and `/srv/models` on their subvolumes; SSH key login works after reboot; every fixture entry survives with content, ownership, mode, link count, symlink target, xattrs and ACLs intact; `fstab`, `crypttab`, md assembly, GRUB and initramfs all verify; a second run of the migration recognises the completed state and exits 0; and an injected failure at each stage either recovers or leaves instructions a person can follow |
+| **B0** | **Back up the machine that exists today, and prove the backup is real** | Back up `/home` and `/etc` to the bucket, restore to scratch storage on a *different* machine, and diff. Then build the §10.2 second copy, define its owner, schedule, retention, capacity alert and failure alert, restore **from it**, and record the recovery-point objective. **Record explicitly that T5 is open** -- a write-capable token on the box can erase the bucket -- and that RAID0 is accepted on those terms |
 
-**S2 exists because `install.sh` starts after installation** (§1.2), so the most
-consequential part of the machine, the storage layout, is currently reproduced by nothing.
-A runbook that has been executed twice is the artifact; prose describing the layout is not.
+**RAID0 stays blocked until B0 passes.** Striping means either drive failing destroys the
+volume, so the backup is not a precaution here, it is the only copy.
+
+### The framework, before anything it configures
+
+| # | Milestone | Exit test |
+|-|-|-|
+| **I1** | `install.sh`, `00-preflight`, `10-base` | A fresh Ubuntu run succeeds; an immediate second run changes nothing; a failed module stops the ones after it; re-running just the failed module works; unsupported OS and architecture fail **before any mutation**; a concurrent run is refused; existing user configuration is backed up or preserved; a machine-readable run record is written |
+| **C1** | The plain console slice | tty1 presentation, tty2 recovery getty, local PAM login, a `cdl` launcher offering status/workspace/shell, key-only SSH, and separate local and remote workspaces. **The test is simultaneous local and SSH use**, including non-interactive `ssh host cmd`, `scp`, `rsync` and git-over-SSH: none may enter the launcher (§9.3) |
+
+**`kmscon`, ligatures, palette generation, the logo and the dashboard are deliberately not
+in C1.** They sit on top of a console that has to be reliable first, and every one of them
+is a thing that can fail between a person and their recovery shell.
 
 ### The machine
 
 | # | Milestone | Exit test |
 |-|-|-|
-| **B1** | Base install, console and SSH, Tailscale, power policy | Reboot, **enter the LUKS passphrase at the machine**, and after boot completes it becomes reachable over the tailnet by name with no further intervention. `/proc/acpi/wakeup` shows XHCI disabled and `systemd-sleep` masked |
-| **B1a** | Network exposure is what the spec says | From off-tailnet: SSH refused, dashboard refused, model port refused. From on-tailnet: SSH accepted, dashboard accepted. `mosh`'s UDP range reachable on the tailnet only. Jupyter bound to localhost and **not** reachable from another device even on the tailnet |
-| **B2** | NVIDIA, CUDA, PyTorch | `nvidia-smi` reports the 3080 and `torch.cuda.is_available()` returns true, both **after a reboot**, not only after install |
-| **B3** | Live with it | Several days of real work over SSH. This is a judgement, and it is the one that decides whether any of the rest is worth building |
-| **B4** | Ollama | A model answers on `11434` from **another device** on the tailnet. Measure and record actual VRAM use, load time, tokens/sec and package temperature under sustained load, because §2.3's thresholds are guesses until then |
+| **H1** | Tensorbook base install | Only after V4 and B0. LUKS unlock at the machine, console login, SSH, both NVMe devices present with SMART monitoring, suspend disabled and lid/power behaviour correct, `/proc/acpi/wakeup` showing XHCI disabled. **Recovery media stays physically available.** Then stop |
+| **H1a** | Network exposure is what the spec says | From off-tailnet: SSH, dashboard and model port all refused. From on-tailnet: SSH and dashboard accepted. Jupyter bound to localhost and **not** reachable from another device even on the tailnet |
+| **H2** | **Live with it** | Several days of real work over SSH before any ML component is added. This is a judgement, and it is the one that decides whether the rest is worth building |
+| **G1** | NVIDIA, CUDA, PyTorch | `nvidia-smi` reports the 3080 and `torch.cuda.is_available()` returns true **after a reboot**, not only after install. CPU and GPU telemetry running, and a thermal soak measured. **§2.3's temperature and VRAM thresholds are replaced with recorded numbers** |
+| **M1** | Ollama | A model answers on `11434` from **another device** on the tailnet. Record cold-load time, peak and idle VRAM, tokens/sec, the effect of context length, CPU and GPU temperature, power, remote latency, and behaviour under concurrent requests |
 | **S3** | **Can one stored copy serve both servers?** (§5.2) | Hand an Ollama blob to `llama-server` for the exact quantisation in use. Pass means one copy; fail means storage is doubled and the spec says so |
-| **B5** | `llama-swap`, and the GPU lock | Codex talks to `llama-server` over Responses on `8081`. Then `cdl-gpu train` names the services it will stop, stops them, holds the GPU, and **restarts them when the run exits** -- including when the run is `SIGKILL`ed, which is the case a shell trap would miss |
-| **B6** | Agent CLIs, `zellij`, session logging | All four launch, authenticate and run a trivial task. Claude Code's phone steering still works, which is what §4.1 protects. Kill a session and confirm its `script(1)` log survives with the transcript intact |
-| **B7** | Backup, on the new machine | Restore `/home` to a scratch directory and diff it. Confirm the second copy (§10.2) is still pulling, and run one restore **from the second copy** rather than from the bucket |
-| **B7a** | Rollback across a kernel change | Snapshot, upgrade the kernel, `apt autoremove` the old one, then roll back. The machine must boot: `/lib/modules` and `/boot` have to agree, which is what §11.4's `/boot` archive exists for and what a plain subvolume swap fails |
-| **B8** | Read-only dashboard | Panels in §8.1 match the machine's real state, checked from a phone. No write actions exist |
-| **B9** | Provisioning reproduces the machine | The script runs clean on a fresh VM, then runs again and changes nothing. Together with S2's runbook, this is the whole reproducibility claim |
+| **M2** | `llama-swap` | **Only if a concrete Responses or Anthropic-compatible requirement cannot be met by Ollama.** Codex talks to `llama-server` over Responses on `8081` |
+| **A1** | Agent CLIs and the GPU training lifecycle | All four CLIs launch, authenticate and run a trivial task with per-process credentials. Claude Code's phone steering still works (§4.1). Then `cdl-gpu train` names the services it will stop, stops them, holds the GPU, and **restarts exactly those it stopped** on normal exit, non-zero exit, signal termination and `SIGKILL` -- the last being the case a shell trap would miss |
+| **B7** | Backup, on the new machine | Restore `/home` to a scratch directory and diff. Confirm the second copy is still pulling, and run one restore **from the second copy** |
+| **B7a** | Rollback across a kernel change | Snapshot, upgrade the kernel, `apt autoremove` the old one, roll back. The machine must boot: `/lib/modules` and `/boot` have to agree, which is what §11.4's `/boot` archive exists for and what a plain subvolume swap fails |
+| **S4** | **Does `kmscon` shape ligatures on the real panel?** (§9.6) | Start `kmscon` on tty1 against the Intel iGPU with the NVIDIA driver loaded, display `=>`, `!=` and `->`, photograph the screen. Failure costs ligatures, not the design |
+| **P1** | Presentation and observability | `kmscon` with Fira Code, palette generation, Plymouth branding, the read-only dashboard checked from a phone, backup and update notices, SMART and thermal alerts. Panels match the machine's real state and no write actions exist |
+| **B9** | Provisioning reproduces the machine | `install.sh` runs clean on a fresh VM, then runs again and changes nothing. With V4's installs, that is the whole reproducibility claim |
 
-**B1 through B3 is the decision point.** If the machine is not pleasant to work on over SSH,
-that needs finding out before the model-serving and agent layers get built on top of it.
+**H1 through H2 is the decision point.** If the machine is not pleasant to work on over SSH,
+that needs finding out before the model-serving and agent layers are built on top of it.
 
 ## 13. Open questions
 
