@@ -10,6 +10,13 @@ bad() { fail=$((fail+1)); printf '  FAIL  %s\n' "$*"; }
 
 [ -f "$manifest" ] || { echo "FATAL: no manifest at $manifest"; exit 1; }
 
+# The fixture deliberately does not touch authorized_keys, so the manifest must not carry
+# it. If it ever does, the fixture has started clobbering the machine's login credential
+# and that is a failure regardless of whether the content matches.
+if grep -q '/\.ssh/authorized_keys' "$manifest"; then
+    bad "the fixture recorded authorized_keys; it must not touch the real login credential"
+fi
+
 while IFS=$'\t' read -r rel kind a uid gid mode nlink; do
     [ -n "$rel" ] || continue
     case "$kind" in

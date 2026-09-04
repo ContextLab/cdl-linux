@@ -77,6 +77,20 @@ def main():
            "-device", "virtio-net-pci,netdev=net0",
            "-nographic"]
 
+    # Refuse to start on top of another VM holding these disks. qemu would fail to take
+    # the image lock and exit, and the SSH probe below would then succeed against the OTHER
+    # machine through the same port forward -- reporting a successful boot of a VM that
+    # never started. That happened, and a harness that reports the wrong answer is worse
+    # than one that reports nothing.
+    other = subprocess.run(["pgrep", "-f", "qemu-system"], capture_output=True, text=True)
+    for pid in other.stdout.split():
+        cmdline = subprocess.run(["ps", "-p", pid, "-o", "command="],
+                                 capture_output=True, text=True).stdout
+        if "serial=cdl0" in cmdline:
+            print(f"==> refusing to boot: pid {pid} is already using these disks.")
+            print(f"    Stop it first:  kill {pid}")
+            return 1
+
     print("==> booting; will answer the LUKS prompt on the serial console")
     proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                             stderr=subprocess.STDOUT, bufsize=0)
@@ -112,14 +126,24 @@ def main():
                 sent += 1
                 print(f"\n==> sent LUKS passphrase (attempt {sent})")
                 buf = b""
-        if ssh_up(cfg["ssh_port"]):
+        # Only trust the SSH probe while our own qemu is alive. The port forward is not
+        # evidence that the forward belongs to us.
+        if proc.poll() is None and ssh_up(cfg["ssh_port"]):
             booted = True
             break
 
-    if booted:
+    if booted and proc.poll() is None:
         print(f"\n==> SSH is up on port {cfg['ssh_port']}; passphrase prompts answered: {sent}")
-        print("==> VM left running. Stop it with: pkill -f 'qemu.*cdl0'")
+        # Deliberately a PID, not a pattern. `pkill -f 'qemu.*cdl0'` matches the command
+        # line of any shell that contains that string -- including the shell running the
+        # pkill -- so it has twice killed a VM run it was meant to leave alone.
+        print(f"==> VM left running as pid {proc.pid}. Stop it with: kill {proc.pid}")
         return 0
+
+    if booted:
+        print(f"\n==> qemu exited ({proc.returncode}) even though port "
+              f"{cfg['ssh_port']} answered; that SSH was not ours")
+        return 1
 
     print(f"\n==> did not reach SSH within {args.timeout}s (passphrase prompts answered: {sent})")
     proc.terminate()

@@ -14,10 +14,19 @@ M="$TARGET/srv/models"
 mkdir -p "$H/cdl/.ssh" "$H/cdl/.config/tool" "$H/cdl/empty-dir" "$M"
 
 # Hidden state that a naive `mv dir/*` would leave behind.
-printf 'ssh-ed25519 AAAAFIXTUREKEY fixture@cdl\n' > "$H/cdl/.ssh/authorized_keys"
-chmod 600 "$H/cdl/.ssh/authorized_keys"; chmod 700 "$H/cdl/.ssh"
+#
+# NOT authorized_keys. An earlier version of this fixture overwrote it with a fake key,
+# which is the one file in this tree the machine cannot afford to lose: had nothing
+# restored it, the install would have completed with no way to log in. A fixture that can
+# break the system it is testing is not a fixture. The real authorized_keys is left
+# untouched and is exercised for real, by the harness logging in over SSH at all.
+printf 'ssh-ed25519 AAAAFIXTUREKEY fixture@cdl\n' > "$H/cdl/.ssh/fixture_keys"
+chmod 600 "$H/cdl/.ssh/fixture_keys"; chmod 700 "$H/cdl/.ssh"
 printf 'export CDL_FIXTURE=1\n'   > "$H/cdl/.profile"
-printf 'fixture-bashrc\n'         > "$H/cdl/.bashrc"
+# Valid shell, not a bare word. An earlier version wrote `fixture-bashrc`, which bash tried
+# to EXECUTE on every non-interactive ssh into the machine, printing "command not found" to
+# the stderr of every harness command that followed. A fixture must be inert.
+printf '# cdl fixture marker\nCDL_FIXTURE_BASHRC=1\n' > "$H/cdl/.bashrc"
 printf '[tool]\nkey = value\n'    > "$H/cdl/.config/tool/config"
 
 # A hidden entry directly in /home -- the case the old glob-based migration actually missed.

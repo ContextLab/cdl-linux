@@ -63,9 +63,14 @@ check "root sits on the mapped device" "§2.1" "cryptroot"    "findmnt -no SOURC
 # The three subvolumes are the part draft 1 of this harness did not check, so it passed a
 # flat btrfs root that does not match the spec. A verifier that accepts the wrong layout is
 # worse than no verifier, because it converts an open question into a false answer.
-check "subvolume @ exists"             "§2.1" "(^|/)@\$"     "sudo btrfs subvolume list /"
-check "subvolume @home exists"         "§2.1" "@home"        "sudo btrfs subvolume list /"
-check "subvolume @models exists"       "§2.1" "@models"      "sudo btrfs subvolume list /"
+# `btrfs subvolume list` needs root -- unprivileged it fails with "can't perform the
+# search: Operation not permitted" and prints nothing, which a pattern match reads as
+# "subvolume absent". These three reported the layout missing on a machine that had it.
+# check_root feeds the password on stdin; plain `check` with a `sudo` in the command
+# string cannot, because there is no tty to prompt on.
+check_root "subvolume @ exists"     "§2.1" "btrfs subvolume list /" "path @\$"
+check_root "subvolume @home exists" "§2.1" "btrfs subvolume list /" "path @home\$"
+check_root "subvolume @models exists" "§2.1" "btrfs subvolume list /" "path @models\$"
 check "/ is mounted from subvol @"     "§2.1" "subvol=/@"    "findmnt -no OPTIONS /"
 check "/home is its own subvolume"     "§2.1" "subvol=/@home" "findmnt -no OPTIONS /home"
 check "/srv/models is its own subvolume" "§2.1" "subvol=/@models" "findmnt -no OPTIONS /srv/models"

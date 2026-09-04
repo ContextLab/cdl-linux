@@ -158,30 +158,48 @@ autoinstall:
     - cp /run/cdl/fixture-verify.sh /target/var/log/cdl/fixture-verify.sh
     - chmod 0755 /target/var/log/cdl/fixture-verify.sh
 
-    # Serial console on the installed system, so a reboot can be driven and observed
-    # without a display. This matches the console-first design: the machine's own screen is
-    # a place work happens, and the serial line is how the harness reaches it.
+    # Everything that needs a chroot, in ONE block with a trap.
     #
-    # These run through `chroot /target`, NOT `curtin in-target`. The migration above
-    # unmounted and remounted /target, so curtin's record of what is mounted is stale and
-    # its in-target call fails with exit 2. One helper for every target operation.
+    # `chroot /target`, not `curtin in-target`: the migration above unmounted and remounted
+    # /target, so curtin's own record of what is mounted no longer matches reality. (The
+    # earlier claim that in-target fails with exit 2 for that reason was never actually
+    # measured -- see spec §2.1.3. The chroot is used because one helper for every target
+    # operation is simpler, not because the alternative is proven broken.)
+    #
+    # THE TRAP IS THE POINT. An earlier version mounted proc/sys/dev/run into /target in one
+    # late-command and never unmounted them, because there was no single place responsible
+    # for doing so. subiquity's own `umount --recursive /target` at shutdown then failed
+    # with exit 32 and the install reported an error after everything had actually worked.
+    # Mounting and unmounting now live in the same block, and the unmount runs on any exit.
     - |
       set -eux
+      cleanup() {
+        rc=$?
+        for v in run dev/pts dev sys proc; do
+          umount -R "/target/$v" 2>/dev/null || true
+        done
+        return $rc
+      }
+      trap cleanup EXIT
+
       for v in proc sys dev dev/pts run; do
         mkdir -p "/target/$v"
         mount --rbind "/$v" "/target/$v" 2>/dev/null || mount --bind "/$v" "/target/$v"
       done
-    - chroot /target sed -i 's/^GRUB_CMDLINE_LINUX_DEFAULT=.*/GRUB_CMDLINE_LINUX_DEFAULT="console=tty1 console=ttyAMA0,115200"/' /etc/default/grub
-    - chroot /target sed -i 's/^#\?GRUB_TERMINAL=.*/GRUB_TERMINAL="console serial"/' /etc/default/grub
-    - chroot /target update-grub
 
-    # Record what the installer actually produced, so the verification step compares
-    # against reality rather than against this file's intent.
-    - chroot /target sh -c 'mkdir -p /var/log/cdl'
-    - chroot /target sh -c 'lsblk -o NAME,SIZE,TYPE,FSTYPE,MOUNTPOINT > /var/log/cdl/lsblk.txt 2>&1 || true'
-    - chroot /target sh -c 'cat /etc/crypttab > /var/log/cdl/crypttab.txt 2>&1 || true'
-    - chroot /target sh -c 'cat /etc/fstab > /var/log/cdl/fstab.txt 2>&1 || true'
-    - chroot /target sh -c 'cat /proc/mdstat > /var/log/cdl/mdstat.txt 2>&1 || true'
-    - chroot /target sh -c 'lsinitramfs /boot/initrd.img-$(ls /lib/modules | head -1) 2>/dev/null | grep -cE "cryptsetup|md" > /var/log/cdl/initramfs-bits.txt 2>&1 || true'
-    # The question this run exists to answer.
-    - chroot /target sh -c 'btrfs subvolume list / > /var/log/cdl/subvolumes.txt 2>&1 || echo NONE > /var/log/cdl/subvolumes.txt'
+      # Serial console on the installed system, so a reboot can be driven and observed
+      # without a display. This matches the console-first design: the machine's own screen
+      # is a place work happens, and the serial line is how the harness reaches it.
+      chroot /target sed -i 's/^GRUB_CMDLINE_LINUX_DEFAULT=.*/GRUB_CMDLINE_LINUX_DEFAULT="console=tty1 console=ttyAMA0,115200"/' /etc/default/grub
+      chroot /target sed -i 's/^#\?GRUB_TERMINAL=.*/GRUB_TERMINAL="console serial"/' /etc/default/grub
+      chroot /target update-grub
+
+      # Record what the installer actually produced, so verification compares against
+      # reality rather than against this file's intent.
+      chroot /target sh -c 'mkdir -p /var/log/cdl'
+      chroot /target sh -c 'lsblk -o NAME,SIZE,TYPE,FSTYPE,MOUNTPOINT > /var/log/cdl/lsblk.txt 2>&1 || true'
+      chroot /target sh -c 'cat /etc/crypttab > /var/log/cdl/crypttab.txt 2>&1 || true'
+      chroot /target sh -c 'cat /etc/fstab > /var/log/cdl/fstab.txt 2>&1 || true'
+      chroot /target sh -c 'cat /proc/mdstat > /var/log/cdl/mdstat.txt 2>&1 || true'
+      chroot /target sh -c 'lsinitramfs /boot/initrd.img-$(ls /lib/modules | head -1) 2>/dev/null | grep -cE "cryptsetup|md" > /var/log/cdl/initramfs-bits.txt 2>&1 || true'
+      chroot /target sh -c 'btrfs subvolume list / > /var/log/cdl/subvolumes.txt 2>&1 || echo NONE > /var/log/cdl/subvolumes.txt'

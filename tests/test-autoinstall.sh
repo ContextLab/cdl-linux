@@ -148,5 +148,22 @@ PY
 then ok "production disks are matched by identity with a count guard"
 else bad "production disks are matched by enumeration order"; fi
 
+# Anything mounted into /target must be unmounted, or subiquity's own
+# `umount --recursive /target` at shutdown fails with exit 32 and the install reports an
+# error after everything actually worked.
+if python3 - "$SEED" <<'PY'
+import sys, yaml
+d = yaml.safe_load(open(sys.argv[1]))
+for cmd in d["autoinstall"]["late-commands"]:
+    text = cmd if isinstance(cmd, str) else " ".join(cmd)
+    if "mount --rbind" in text or "mount --bind" in text:
+        assert "umount" in text, (
+            "a late-command mounts into /target without unmounting in the same block")
+        assert "trap" in text, (
+            "a late-command mounts into /target without a trap to guarantee teardown")
+PY
+then ok "every late-command that mounts into /target also tears it down"
+else bad "a late-command leaves mounts under /target"; fi
+
 printf '\n  test-autoinstall: %d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]
