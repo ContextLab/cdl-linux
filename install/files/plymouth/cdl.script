@@ -1,0 +1,142 @@
+# CDL boot splash.  Plymouth "script" plugin.
+#
+# Spec §9.8 asks for three things and forbids a fourth:
+#   * the logo, CENTRED on the panel
+#   * the LUKS passphrase prompt BENEATH it
+#   * Escape reveals the boot log
+#   * and no signed executable is replaced -- this is a config file and a PNG
+#
+# HOW ESCAPE WORKS, since it is a requirement and it is NOT implemented here.  Escape is
+# handled by plymouthd itself, which switches from the graphical splash to its "details"
+# display; a theme neither enables nor disables that.  What a theme CAN do is defeat the
+# purpose of it, by swallowing the messages plymouthd sends it.  So this script implements
+# the message and normal callbacks and actually draws what it is given, rather than
+# defining them as empty functions -- which is the common way a pretty theme ends up
+# hiding the failure you needed to read.
+#
+# COLOURS come from the palette (§9.7), and this file is a TEMPLATE.  plymouthd reads the
+# theme from the initramfs, where /etc/cdl does not exist, so the values cannot be looked
+# up at draw time -- they have to be baked in.  Baking them in by hand would be the
+# "palette maintained in six places" §9.7 warns about, so instead install/modules/
+# 52-branding.sh substitutes the colour tokens below from /etc/cdl/palette.conf when it
+# installs the theme.  Plymouth script takes floats in 0..1; the module does the
+# conversion.  A leftover token in an installed theme is a bug, and the test suite greps
+# for exactly that.
+
+# --- the ground ------------------------------------------------------------------------
+# An explicit background rather than whatever was on the framebuffer.  Without this the
+# logo composites onto the firmware's leftovers, which differ between a cold boot and a
+# reboot.
+Window.SetBackgroundTopColor(@@BG_R@@, @@BG_G@@, @@BG_B@@);
+Window.SetBackgroundBottomColor(@@BG_R@@, @@BG_G@@, @@BG_B@@);
+
+screen_width  = Window.GetWidth();
+screen_height = Window.GetHeight();
+
+# --- the logo, centred ---------------------------------------------------------------------
+logo.image  = Image("logo.png");
+logo.sprite = Sprite(logo.image);
+logo.width  = logo.image.GetWidth();
+logo.height = logo.image.GetHeight();
+
+# Centred horizontally; sat slightly above the vertical centre so that the passphrase
+# prompt below it is itself near the middle of the panel rather than at the bottom.
+logo.x = screen_width  / 2 - logo.width  / 2;
+logo.y = screen_height / 2 - logo.height / 2 - screen_height / 12;
+logo.sprite.SetX(logo.x);
+logo.sprite.SetY(logo.y);
+logo.sprite.SetZ(0);
+
+# Everything else is placed relative to the logo's bottom edge, so the layout holds on a
+# 1920x1080 panel and on the 800x600 the installer's VM uses.
+below_logo = logo.y + logo.height + screen_height / 24;
+
+# NOTE ON NAMING.  These are deliberately not called `prompt` and `bullets`.  Plymouth's
+# script language has one namespace, and `display_password_callback` receives parameters
+# with exactly those names -- so a global `prompt.sprite` would be shadowed by the string
+# parameter `prompt` inside the very function that needs to draw it, and the assignment
+# would silently land on the parameter instead.
+status.sprite  = Sprite();
+entry.sprite   = Sprite();
+dots.sprite    = Sprite();
+message.sprite = Sprite();
+
+# --- helpers ----------------------------------------------------------------------------
+fun centre_x(image) {
+    return screen_width / 2 - image.GetWidth() / 2;
+}
+
+fun clear(sprite) {
+    sprite.SetImage(Image.Text(" ", 0, 0, 0, 0));
+}
+
+# --- the LUKS passphrase prompt, beneath the logo ------------------------------------------
+# plymouthd calls this with the prompt text and the number of characters typed.  Bullets
+# rather than the passphrase: the count is all this is given, which is the correct design
+# and worth not working around.
+fun display_password_callback(prompt_text, bullet_count) {
+    entry.image = Image.Text(prompt_text, @@FG_R@@, @@FG_G@@, @@FG_B@@, 1, "Fira Code 12");
+    entry.sprite.SetImage(entry.image);
+    entry.sprite.SetX(centre_x(entry.image));
+    entry.sprite.SetY(below_logo);
+    entry.sprite.SetZ(1);
+
+    # One bullet per typed character, built as a string so the width tracks the input and
+    # stays centred as it grows.
+    typed = "";
+    i = 0;
+    while (i < bullet_count) {
+        typed = typed + "*";
+        i++;
+    }
+    # The palette's bright green, so the thing you are typing into is the one element
+    # wearing the accent.
+    dots.image = Image.Text(typed, @@AC_R@@, @@AC_G@@, @@AC_B@@, 1, "Fira Code 14");
+    dots.sprite.SetImage(dots.image);
+    dots.sprite.SetX(centre_x(dots.image));
+    dots.sprite.SetY(below_logo + screen_height / 24);
+    dots.sprite.SetZ(1);
+
+    # The status line is meaningless while a passphrase is being asked for.
+    clear(status.sprite);
+}
+Plymouth.SetDisplayPasswordFunction(display_password_callback);
+
+# --- ordinary boot ---------------------------------------------------------------------------
+fun display_normal_callback() {
+    clear(entry.sprite);
+    clear(dots.sprite);
+}
+Plymouth.SetDisplayNormalFunction(display_normal_callback);
+
+# --- messages: drawn, never swallowed ----------------------------------------------------------
+# This is the §9.8 constraint in code.  fsck progress, a failed mount, "press Escape to see
+# the boot log" -- all arrive here.  Drawing them is the difference between a splash and a
+# splash that hides a failure.
+fun message_callback(text) {
+    message.image = Image.Text(text, @@FG_R@@, @@FG_G@@, @@FG_B@@, 1, "Fira Code 10");
+    message.sprite.SetImage(message.image);
+    message.sprite.SetX(centre_x(message.image));
+    message.sprite.SetY(screen_height - screen_height / 10);
+    message.sprite.SetZ(2);
+}
+Plymouth.SetMessageFunction(message_callback);
+
+fun status_callback(text) {
+    status.image = Image.Text(text, @@FG_R@@, @@FG_G@@, @@FG_B@@, 0.7, "Fira Code 10");
+    status.sprite.SetImage(status.image);
+    status.sprite.SetX(centre_x(status.image));
+    status.sprite.SetY(screen_height - screen_height / 10);
+    status.sprite.SetZ(2);
+}
+Plymouth.SetUpdateStatusFunction(status_callback);
+
+# --- shutdown ------------------------------------------------------------------------------
+# Without this the logo stays on screen through the whole shutdown, including past the
+# point where services have stopped, which reads as a hang.
+fun quit_callback() {
+    clear(entry.sprite);
+    clear(dots.sprite);
+    clear(status.sprite);
+}
+Plymouth.SetQuitFunction(quit_callback);

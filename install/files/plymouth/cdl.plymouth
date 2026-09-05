@@ -1,0 +1,16 @@
+# The CDL boot splash.  Spec §9.8: "The CDL logo, centred, plus the LUKS passphrase prompt
+# beneath it", with the hard constraint "Escape must reveal the boot log.  A branded splash
+# that hides a failure is worse than no splash."
+#
+# ModuleName=script, not "two-step" or "fade-in", because the script plugin is the only one
+# whose password prompt position is ours to place.  The theme is artwork and configuration
+# only -- no signed executable is touched, per §9.8's hard rule.
+
+[Plymouth Theme]
+Name=CDL
+Description=Contextual Dynamics Laboratory: centred logo, LUKS prompt beneath, Escape shows the boot log
+ModuleName=script
+
+[script]
+ImageDir=/usr/share/plymouth/themes/cdl
+ScriptFile=/usr/share/plymouth/themes/cdl/cdl.script

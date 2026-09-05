@@ -1,0 +1,24 @@
+// The agent-work layout (spec §9.5: "a multiplexer with a layout for agent work").
+//
+// One large pane where the agent runs, and a narrower companion beside it for the things
+// you do *while* it runs -- reading the diff it is producing, tailing a log, running the
+// test it just broke.  Two panes rather than four: an agent session is one long-running
+// thing plus one place to look at it, and a grid of idle panes is just less room for the
+// pane that matters.
+
+layout {
+    pane size=1 borderless=true {
+        plugin location="zellij:tab-bar"
+    }
+
+    pane split_direction="vertical" {
+        // The agent runs here.  Two thirds, because it is the one with the long output.
+        pane size="65%" name="agent" focus=true
+        // Everything you do while watching it.
+        pane size="35%" name="side"
+    }
+
+    pane size=2 borderless=true {
+        plugin location="zellij:status-bar"
+    }
+}

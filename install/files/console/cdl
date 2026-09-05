@@ -1,0 +1,361 @@
+#!/usr/bin/env bash
+# The CDL home screen and command surface.
+#
+# Spec §9.1: "`cdl` is launched from the login shell explicitly, never from .profile."
+# Nothing in this repository invokes it automatically, and nothing should. It is a real
+# executable in /usr/local/bin rather than a shell alias so that `ssh host cdl status`,
+# `scp`, `rsync` and git-over-SSH all behave -- an alias exists only inside an interactive
+# shell, and a launcher that runs from a shell rc would capture every one of those.
+#
+#   cdl                     the home screen (interactive terminal only)
+#   cdl status              what is running, GPU, disk, last backup
+#   cdl workspace [--shared]  create or attach a zellij workspace
+#   cdl chat [model]        talk to a local model, right here
+#   cdl agents              list agent sessions
+#   cdl shell               drop to a plain shell
+#   cdl help                this text
+#
+# NOT A TERMINAL?  Every path that would draw a screen or read a key prints the help and
+# exits 1 instead. That is the property that makes this safe to have on PATH: a
+# non-interactive session that reaches it by accident gets a diagnosable error on stderr,
+# not a menu written into whatever was reading its stdout.
+
+set -uo pipefail
+
+CDL_VERSION="1.0"
+
+# --- colour ----------------------------------------------------------------------------
+# The palette (§9.7) is applied to the terminal itself, so this uses ANSI indices and
+# inherits whatever cdl-palette-apply set. On a terminal that is not ours the numbers
+# still mean the right things, they are just someone else's shades.
+if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
+    A=$'\033[32m'      # accent / green
+    D=$'\033[90m'      # dim
+    W=$'\033[33m'      # warn
+    E=$'\033[31m'      # bad
+    G=$'\033[92m'      # good
+    B=$'\033[1m'
+    O=$'\033[0m'
+else
+    A=; D=; W=; E=; G=; B=; O=
+fi
+
+say() { printf '%s\n' "$*"; }
+
+# --- where am I? -------------------------------------------------------------------------
+# §9.3: "cdl workspace gives the console and SSH different sessions by default, named for
+# where they came from."
+#
+# SSH_CONNECTION is set by sshd in the environment of the login shell it starts, and is
+# absent on a session started by a local getty. It is the honest signal for "did this
+# come over the network", and it is what the name derives from.
+#
+# This is a function, not four lines inline, because it is the rule the whole separation
+# rests on and it is tested directly.
+cdl_session_name() {
+    if [ -n "${SSH_CONNECTION:-}" ]; then
+        printf 'cdl-remote'
+    else
+        printf 'cdl-local'
+    fi
+}
+
+# Whether we can draw a screen and read a key. Both halves matter: stdout not being a
+# terminal means the output is going somewhere that did not ask for a menu, and stdin not
+# being one means there is nobody to answer it.
+cdl_is_tty() { [ -t 0 ] && [ -t 1 ]; }
+
+have() { command -v "$1" >/dev/null 2>&1; }
+
+usage() {
+    cat <<USAGE
+${B}cdl${O} -- the CDL workstation home screen
+
+  ${B}cdl${O}                     the home screen (needs an interactive terminal)
+  ${B}cdl status${O}              services, GPU, disk, last backup
+  ${B}cdl workspace${O}           create or attach this session's zellij workspace
+  ${B}cdl workspace --shared${O}  list workspaces with clients attached, and join one
+  ${B}cdl chat${O} [model]        talk to a local model at this terminal
+  ${B}cdl agents${O}              list agent sessions
+  ${B}cdl shell${O}               a plain shell, no workspace
+  ${B}cdl help${O}                this text
+
+This session's workspace would be: ${A}$(cdl_session_name)${O}
+Local and remote workspaces are separate by default (spec 9.3); --shared joins one
+deliberately, after showing who is already attached.
+USAGE
+}
+
+# --- status pieces -----------------------------------------------------------------------
+# Each of these answers with one short line and never fails the caller: a status screen
+# whose job is to say what is wrong must not itself break when something is wrong.
+
+svc_state() {
+    local unit="$1"
+    if ! have systemctl; then printf '%s?%s' "$D" "$O"; return; fi
+    if systemctl is-active --quiet "$unit" 2>/dev/null; then
+        printf '%sup%s' "$G" "$O"
+    elif systemctl list-unit-files "$unit" >/dev/null 2>&1 \
+         && systemctl list-unit-files "$unit" 2>/dev/null | grep -q "$unit"; then
+        printf '%sdown%s' "$E" "$O"
+    else
+        printf '%s--%s' "$D" "$O"
+    fi
+}
+
+gpu_line() {
+    if ! have nvidia-smi; then
+        printf '%sno NVIDIA GPU on this machine%s' "$D" "$O"
+        return
+    fi
+    local out
+    out="$(nvidia-smi --query-gpu=name,utilization.gpu,memory.used,memory.total,temperature.gpu \
+            --format=csv,noheader,nounits 2>/dev/null | head -1)"
+    if [ -z "$out" ]; then
+        printf '%snvidia-smi present but reported nothing (driver not loaded?)%s' "$W" "$O"
+        return
+    fi
+    local name util used total temp
+    IFS=',' read -r name util used total temp <<< "$out"
+    # shellcheck disable=SC2001
+    name="$(echo "$name" | sed 's/^ *//;s/ *$//')"
+    printf '%s  %s%s%%%s used  %s%s/%s MiB%s  %s%s C%s' \
+        "$name" "$A" "${util// /}" "$O" "$A" "${used// /}" "${total// /}" "$O" "$A" "${temp// /}" "$O"
+}
+
+disk_line() {
+    local out
+    out="$(df -h --output=target,pcent,avail / /home /srv/models 2>/dev/null | tail -n +2 \
+           | awk '{printf "%s %s used, %s free   ", $1, $2, $3}')"
+    [ -n "$out" ] || out="$(df -h / 2>/dev/null | awk 'NR==2{printf "/ %s used, %s free", $5, $4}')"
+    printf '%s' "${out:-unknown}"
+}
+
+backup_line() {
+    # The backup module records its last run here. Absent is a real answer -- "never" --
+    # and is shown as such rather than hidden.
+    local f=/var/log/cdl/last-backup
+    if [ -r "$f" ]; then
+        printf '%s' "$(head -1 "$f")"
+    else
+        printf '%snever run on this machine%s' "$W" "$O"
+    fi
+}
+
+workspace_line() {
+    if ! have zellij; then printf '%szellij not installed%s' "$D" "$O"; return; fi
+    local n
+    n="$(zellij list-sessions --short 2>/dev/null | grep -c .)" || n=0
+    if [ "${n:-0}" -eq 0 ]; then
+        printf '%snone%s' "$D" "$O"
+    else
+        printf '%s%s%s (%s)' "$A" "$n" "$O" "$(zellij list-sessions --short 2>/dev/null | tr '\n' ' ')"
+    fi
+}
+
+cmd_status() {
+    local host tsip
+    host="$(hostname)"
+    tsip="$(have tailscale && tailscale ip -4 2>/dev/null | head -1)"
+
+    say ""
+    say "  ${B}${host}${O}${tsip:+   ${D}tailnet${O} ${A}${tsip}${O}}   ${D}$(date '+%Y-%m-%d %H:%M')${O}"
+    say ""
+    say "  ${D}services${O}   ollama $(svc_state ollama.service)   llama-swap $(svc_state llama-swap.service)   tailscale $(svc_state tailscaled.service)"
+    say "  ${D}gpu${O}        $(gpu_line)"
+    say "  ${D}disk${O}       $(disk_line)"
+    say "  ${D}backup${O}     $(backup_line)"
+    say "  ${D}workspace${O}  $(workspace_line)   ${D}this session would use${O} ${A}$(cdl_session_name)${O}"
+    say ""
+    # Uptime and load, one line, because a machine that rebooted unexpectedly (§7.3) is
+    # something you want to notice without asking.
+    if [ -r /proc/uptime ]; then
+        say "  ${D}uptime${O}     $(uptime -p 2>/dev/null || true)   ${D}load${O} $(cut -d' ' -f1-3 /proc/loadavg 2>/dev/null)"
+        say ""
+    fi
+}
+
+# --- workspace ---------------------------------------------------------------------------
+cmd_workspace() {
+    have zellij || { printf '%scdl: zellij is not installed%s\n' "$E" "$O" >&2; return 1; }
+
+    local shared=0
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --shared) shared=1; shift ;;
+            attach)   shift ;;                 # `cdl workspace attach --shared`, per §9.3
+            *) printf 'cdl workspace: unknown argument %s\n' "$1" >&2; return 1 ;;
+        esac
+    done
+
+    if [ "$shared" -eq 1 ]; then
+        cdl_workspace_shared
+        return
+    fi
+
+    local name; name="$(cdl_session_name)"
+    # `zellij attach --create` is one call that attaches if the session exists and creates
+    # it if it does not, which is the whole behaviour wanted here and avoids a race
+    # between checking and creating.
+    #
+    # The agent layout is NOT passed as a flag. /etc/cdl/zellij/config.kdl sets
+    # `default_layout "agents"`, so a session created here already has it; adding
+    # `--layout` would be a second place the layout is named, and its acceptance in this
+    # argument position is not something this script can verify at runtime.
+    exec zellij attach --create "$name"
+}
+
+cdl_workspace_shared() {
+    # §9.3: sharing "first lists the clients already connected. The default is separation;
+    # sharing is a choice made with the information needed to make it."
+    local sessions
+    sessions="$(zellij list-sessions 2>/dev/null)"
+    if [ -z "$sessions" ]; then
+        say "${W}No workspaces are running, so there is nothing to share.${O}"
+        say "Run ${B}cdl workspace${O} to start ${A}$(cdl_session_name)${O}."
+        return 1
+    fi
+
+    say ""
+    say "  ${B}Workspaces currently running${O}"
+    say "  ${D}Joining one means whoever is already in it sees your keystrokes, and you see"
+    say "  theirs. That is the point of --shared, and it is why it is not the default.${O}"
+    say ""
+    # zellij's long listing carries the client count, so this shows what §9.3 asks for
+    # rather than only the names.
+    printf '%s\n' "$sessions" | sed 's/^/    /'
+    say ""
+
+    if ! cdl_is_tty; then
+        say "Not a terminal; not attaching. Run: zellij attach <name>"
+        return 1
+    fi
+
+    local pick
+    printf '  Attach to which? (name, or empty to cancel): '
+    read -r pick || return 1
+    [ -n "$pick" ] || { say "  cancelled"; return 0; }
+    exec zellij attach "$pick"
+}
+
+# --- chat ---------------------------------------------------------------------------------
+cmd_chat() {
+    local model="${1:-}"
+    # §1.3 / §9: "Using a local model from the machine itself is a stated use case." The
+    # box's own model CLI is preferred when the model modules have installed it; ollama is
+    # the fallback because §5.1 makes it the endpoint that always exists.
+    if have cdl-models; then
+        exec cdl-models chat ${model:+"$model"}
+    fi
+    if have ollama; then
+        if [ -z "$model" ]; then
+            # Naming a default here would hard-code a model this module does not install.
+            # Listing what is actually present is both honest and more useful.
+            say "${B}Local models on this machine${O}"
+            ollama list 2>/dev/null | sed 's/^/    /' || {
+                printf '%scdl: ollama is installed but not answering%s\n' "$E" "$O" >&2; return 1; }
+            say ""
+            say "Pick one:  ${B}cdl chat <model>${O}"
+            return 0
+        fi
+        exec ollama run "$model"
+    fi
+    printf '%scdl: no local model runner found.%s\n' "$E" "$O" >&2
+    printf 'Neither cdl-models nor ollama is installed; the model modules have not run yet.\n' >&2
+    return 1
+}
+
+# --- agents --------------------------------------------------------------------------------
+cmd_agents() {
+    if have cdl-agent; then
+        exec cdl-agent list
+    fi
+    printf '%scdl: cdl-agent is not installed yet%s\n' "$W" "$O" >&2
+    printf 'The agent lifecycle module has not run on this machine.\n' >&2
+    return 1
+}
+
+# --- shell -----------------------------------------------------------------------------------
+cmd_shell() {
+    # §9.1's "drop to a plain shell". Deliberately plain: the user's login shell, no
+    # workspace, no wrapper. If the home screen or zellij is what is broken, this is the
+    # way past it that does not need tty2.
+    local sh="${SHELL:-/bin/bash}"
+    [ -x "$sh" ] || sh=/bin/bash
+    say "${D}plain shell; 'exit' returns to where you were${O}"
+    exec "$sh"
+}
+
+# --- home screen -------------------------------------------------------------------------------
+logo() {
+    # The wordmark, in text, for the terminal. Plymouth draws the real bitmap logo at boot
+    # (§9.8); this is the same identity rendered in the only medium a terminal has.
+    say "${A}${B}"
+    say '      ██████╗ ██████╗ ██╗'
+    say '     ██╔════╝ ██╔══██╗██║'
+    say '     ██║      ██║  ██║██║'
+    say '     ██║      ██║  ██║██║'
+    say '     ╚██████╗ ██████╔╝███████╗'
+    say '      ╚═════╝ ╚═════╝ ╚══════╝'
+    say "${O}${D}      Contextual Dynamics Laboratory${O}"
+}
+
+home() {
+    # A home screen written to something that is not a terminal is the failure this guard
+    # exists for: it would be captured by whatever opened the pipe.
+    if ! cdl_is_tty; then
+        usage >&2
+        printf '\n%scdl: not a terminal, so there is no home screen to draw.%s\n' "$E" "$O" >&2
+        printf 'Use a subcommand (for example: cdl status), or run cdl from an interactive login.\n' >&2
+        exit 1
+    fi
+
+    while true; do
+        clear 2>/dev/null || true
+        logo
+        cmd_status
+        say "  ${D}────────────────────────────────────────────────────────────${O}"
+        say "   ${B}s${O} status      ${B}w${O} workspace   ${B}c${O} chat"
+        say "   ${B}a${O} agents      ${B}!${O} shell       ${B}q${O} quit"
+        say "  ${D}────────────────────────────────────────────────────────────${O}"
+        printf '   %s>%s ' "$A" "$O"
+
+        local key
+        # A closed stdin (the terminal went away) must end the loop, not spin it.
+        read -r key || { say ""; return 0; }
+
+        case "$key" in
+            s|status)    clear 2>/dev/null || true; cmd_status; printf '   %spress enter%s ' "$D" "$O"; read -r _ || return 0 ;;
+            w|workspace) cmd_workspace ;;
+            c|chat)      cmd_chat ;;
+            a|agents)    cmd_agents || { printf '   %spress enter%s ' "$D" "$O"; read -r _ || return 0; } ;;
+            '!'|shell)   cmd_shell ;;
+            q|quit|exit) say ""; return 0 ;;
+            '')          ;;
+            *)           say "   ${W}no such choice: ${key}${O}"; sleep 1 ;;
+        esac
+    done
+}
+
+main() {
+    case "${1:-}" in
+        '')                     home ;;
+        status)                 shift; cmd_status "$@" ;;
+        workspace|ws)           shift; cmd_workspace "$@" ;;
+        chat)                   shift; cmd_chat "$@" ;;
+        agents)                 shift; cmd_agents "$@" ;;
+        shell)                  shift; cmd_shell "$@" ;;
+        help|-h|--help)         usage ;;
+        version|-V|--version)   say "cdl $CDL_VERSION" ;;
+        *)
+            printf '%scdl: unknown command "%s"%s\n\n' "$E" "$1" "$O" >&2
+            usage >&2
+            exit 1 ;;
+    esac
+}
+
+# Sourcing this file defines its functions and runs nothing, so the test suite can call
+# cdl_session_name directly rather than re-implementing the rule it is checking.
+if [ "${BASH_SOURCE[0]}" = "$0" ]; then
+    main "$@"
+fi

@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  FALLBACK ONLY.  This is not the CDL logo.
+
+  The real logo is the lab's avatar, fetched at install time by
+  install/modules/52-branding.sh from https://context-lab.com/images/CDL_Avatar.png with a
+  pinned sha256.  It is fetched rather than committed because the source repository
+  (ContextLab/contextlab.github.io) is MIT-licensed with no separate asset grant, and a
+  public repository should not redistribute a lab's mark on the strength of an inference
+  about licensing.
+
+  This wordmark is what Plymouth draws if that download fails its checksum: a boot
+  splash with no image at all is a black screen, which is indistinguishable from a hang.
+  It is deliberately plain, monochrome, and obviously a placeholder.
+
+  Colours are the palette's (spec 9.7): background #0b1210, foreground #d7e3dc,
+  accent #00703c.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" width="533" height="533" viewBox="0 0 533 533">
+  <rect width="533" height="533" fill="#0b1210"/>
+
+  <!-- A ring in the accent, so the placeholder still reads as "this machine's brand"
+       rather than as a rendering error. -->
+  <circle cx="266.5" cy="266.5" r="196" fill="none" stroke="#00703c" stroke-width="14"/>
+
+  <text x="266.5" y="266.5"
+        font-family="Fira Code, DejaVu Sans Mono, monospace"
+        font-size="150" font-weight="700" letter-spacing="6"
+        fill="#d7e3dc" text-anchor="middle" dominant-baseline="central">CDL</text>
+
+  <text x="266.5" y="372"
+        font-family="Fira Code, DejaVu Sans Mono, monospace"
+        font-size="26" letter-spacing="2"
+        fill="#7c8480" text-anchor="middle">placeholder</text>
+</svg>

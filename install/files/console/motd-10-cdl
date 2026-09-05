@@ -1,0 +1,48 @@
+#!/usr/bin/env bash
+# The two-line status shown after login.  Spec §9.1:
+#
+#   "/etc/motd.d/10-cdl prints a two-line status -- services up, GPU state -- and names
+#    `cdl`.  motd.d runs on interactive login only, which is the property .profile lacks."
+#
+# Ubuntu 26.04 runs /etc/update-motd.d/* from pam_motd; /etc/motd.d carries no packaged
+# entries on this release (checked against the 26.04 Contents index), so this installs as
+# /etc/update-motd.d/10-cdl.
+#
+# THIS PRINTS.  IT DOES NOT LAUNCH ANYTHING.  The distinction is the whole of §9.1: motd
+# output is *displayed* on interactive login, so it cannot capture a `git push`, while a
+# launcher in .profile is *executed* on every shell and would.
+#
+# Every value degrades to a word rather than an error.  A motd script that fails writes
+# its stderr into the login of someone who may be here precisely because something is
+# broken.
+
+set -uo pipefail
+
+# pam_motd runs this with stdout to the terminal.  Colour is used only when that is true.
+if [ -t 1 ]; then A=$'\033[32m'; D=$'\033[90m'; W=$'\033[33m'; E=$'\033[31m'; B=$'\033[1m'; O=$'\033[0m'
+else A=; D=; W=; E=; B=; O=; fi
+
+state() {
+    systemctl is-active --quiet "$1" 2>/dev/null && { printf '%sup%s' "$A" "$O"; return; }
+    systemctl list-unit-files "$1" 2>/dev/null | grep -q "$1" && { printf '%sdown%s' "$E" "$O"; return; }
+    printf '%s--%s' "$D" "$O"
+}
+
+gpu() {
+    command -v nvidia-smi >/dev/null 2>&1 || { printf '%sno GPU%s' "$D" "$O"; return; }
+    local o
+    o="$(nvidia-smi --query-gpu=utilization.gpu,memory.used,memory.total,temperature.gpu \
+         --format=csv,noheader,nounits 2>/dev/null | head -1)"
+    [ -n "$o" ] || { printf '%sdriver not loaded%s' "$W" "$O"; return; }
+    local u used tot t; IFS=',' read -r u used tot t <<< "$o"
+    printf '%s%s%%%s used, %s/%s MiB, %s C' "$A" "${u// /}" "$O" "${used// /}" "${tot// /}" "${t// /}"
+}
+
+printf '\n'
+printf ' %sollama%s %s   %sllama-swap%s %s   %stailscale%s %s   %sgpu%s %s\n' \
+    "$D" "$O" "$(state ollama.service)" \
+    "$D" "$O" "$(state llama-swap.service)" \
+    "$D" "$O" "$(state tailscaled.service)" \
+    "$D" "$O" "$(gpu)"
+printf ' %sType %scdl%s%s for the home screen, or %scdl help%s%s for what it can do.%s\n\n' \
+    "$D" "$B$A" "$O" "$D" "$B$A" "$O" "$D" "$O"

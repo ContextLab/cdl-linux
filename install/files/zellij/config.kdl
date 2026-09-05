@@ -1,0 +1,35 @@
+// CDL zellij configuration, shared by every user via ZELLIJ_CONFIG_DIR=/etc/cdl/zellij.
+//
+// The theme referenced here is NOT in this file.  cdl-palette-apply generates
+// /etc/cdl/zellij/themes/cdl.kdl from /etc/cdl/palette.conf, because spec §9.7 requires
+// the palette to have exactly one source.  Editing colours here instead would be the
+// "palette maintained in six places" the spec names as the thing to avoid.
+
+theme "cdl"
+
+// §9.4: "zellij's own session resurrection is disabled, because a pane's contents
+// surviving a reboot in a cache directory is a copy of the same material with none of the
+// same care."  Session logs are 0600 under ~/.local/state/cdl/sessions and are excluded
+// from every backup set; a serialized pane dump in a cache directory would be the same
+// material with none of that handling.
+session_serialization false
+serialize_pane_viewport false
+
+// The agent layout (§9.5, "a layout for agent work") is what `cdl workspace` asks for by
+// name, but it is also the default so a bare `zellij` gets the same shape.
+default_layout "agents"
+
+// Frames on: with two panes side by side, the boundary and the pane name are how you know
+// which one has focus.  The frame picks up the accent from the generated theme.
+pane_frames true
+
+// Emacs-style editing in the built-in prompts, matching the shell (D3 put keybinding
+// quality at HIGH priority, and a multiplexer that disagrees with the shell about C-a is
+// exactly the kind of friction that makes a machine unpleasant).
+default_mode "normal"
+
+copy_on_select true
+scroll_buffer_size 20000
+
+// $EDITOR is set by /etc/cdl/zshrc to emacsclient when Emacs is installed (§9.5).
+// Leaving this unset makes zellij fall back to it rather than pinning a second answer.
