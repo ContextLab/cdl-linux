@@ -100,10 +100,32 @@ has "reloads sshd only through systemctl reload"        'systemctl reload ssh'
 # shellcheck disable=SC2016  # a literal grep pattern; expansion is exactly what must not happen
 has "reload is gated on the drop-in actually changing"   'if \[ "\$changed" -eq 1 \]'
 
+# --- the "still reachable" guard: a key, or an AuthorizedKeysCommand, before the drop-in ------
+has "checks for an authorized_keys entry before writing the drop-in" '\.ssh/authorized_keys'
+has "accepts an AuthorizedKeysCommand as an alternative to a key"    '[Aa]uthorizedKeysCommand'
+has "documents the CDL_SSH_FORCE override"                           'CDL_SSH_FORCE'
+# shellcheck disable=SC2016  # literal grep patterns; expansion is exactly what must not happen
+has "refuses (die) when neither a key nor AuthorizedKeysCommand is present" 'has_key_line" -eq 0 \] && \[ "\$has_akc" -eq 0'
+# shellcheck disable=SC2016
+keyguard_line="$(grep -n 'has_key_line" -eq 0 \] && \[ "\$has_akc' "$S" | head -1 | cut -d: -f1)"
+if [ -n "$keyguard_line" ] && [ -n "$write_line" ] && [ "$keyguard_line" -lt "$write_line" ]; then
+    ok "the key/AuthorizedKeysCommand guard runs before the drop-in is written"
+else
+    bad "cannot confirm the key guard runs before the drop-in write (guard@${keyguard_line:-?} write@${write_line:-?})"
+fi
+
+# --- no guessable root-owned temp path for sshd -t's stderr -----------------------------------
+has "uses mktemp for the sshd -t error file" 'mktemp'
+lacks "does not use a PID-guessable /tmp path" '/tmp/[A-Za-z0-9_.-]*\$\$'
+
 # --- (c) mosh -------------------------------------------------------------------------------
 has "installs mosh"                                  'cdl_apt_install mosh'
 has "documents mosh's UDP range"                     '60000-61000'
 has "documents the tailnet-only requirement for mosh" '[Tt]ailnet only|tailscale0'
+has "warns at run time that mosh is not tailnet-fenced" 'warn.*mosh.*NOT restricted to the tailnet'
+
+# --- module contract: executable like its siblings --------------------------------------------
+if [ -x "$S" ]; then ok "module is executable (0755, matching sibling modules)"; else bad "module is not executable"; fi
 
 # --- (d) cdl-net-check ------------------------------------------------------------------------
 has "ships /usr/local/bin/cdl-net-check"          '/usr/local/bin/cdl-net-check'

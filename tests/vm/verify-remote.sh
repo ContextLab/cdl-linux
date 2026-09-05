@@ -68,6 +68,14 @@ else
     bad "user cdl does not exist in this guest"
 fi
 
+# --- the key-or-AuthorizedKeysCommand guard: this is *why* the harness could still log in -----
+cdl_home="$(getent passwd cdl | cut -d: -f6)"
+if [ -s "$cdl_home/.ssh/authorized_keys" ] && grep -Eq '^(ssh-|ecdsa-|sk-)' "$cdl_home/.ssh/authorized_keys"; then
+    ok "cdl has a usable key in $cdl_home/.ssh/authorized_keys (the guard's precondition held)"
+else
+    bad "cdl has no usable authorized_keys line at $cdl_home/.ssh/authorized_keys"
+fi
+
 # --- tailscale --------------------------------------------------------------------------------
 if systemctl is-active -q tailscaled 2>/dev/null; then
     ok "tailscaled is active"
