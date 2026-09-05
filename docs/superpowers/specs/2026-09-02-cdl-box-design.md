@@ -1077,7 +1077,10 @@ and rclone reads "no hash" as "same", so same-size corruption passes. The flag i
 
 `--immutable` is necessary and not sufficient. It compares size and mtime; rclone sets the
 local mtime from the remote on pull, so an overwrite in the bucket is caught by its new
-mtime -- unless the attacker preserves it. Measured: preserving it to the second is enough.
+mtime -- unless the attacker preserves it. Measured both ways: a replacement whose mtime
+differed by about a second was caught, and one whose mtime was copied exactly (`touch -r`)
+was skipped. Exact preservation is what it takes, and an attacker who can write the bucket
+can do that.
 
 **Every restic file is named by the SHA-256 of its content** -- keys, index, snapshots and
 data were all checked -- so the puller verifies the copy cryptographically **with no
