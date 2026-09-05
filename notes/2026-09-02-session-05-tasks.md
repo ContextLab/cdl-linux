@@ -225,5 +225,22 @@ Each ships `tests/test-<module>.sh` (macOS, in `run-all.sh`) and `tests/vm/verif
 (inside the guest, run by `run-vm.sh`). Docker Desktop hangs mid-start on this Mac — do
 not call `docker` without a hard timeout; the VM is the integration target.
 
+**Wave 1 results so far (each verified on the arm64 VM: module ok, in-guest verifier
+green, second run idle):**
+
+| Module | Commit | What the VM found that static checks did not |
+|-|-|-|
+| `60-backup` | a464a62 | nothing; 6/6 |
+| `45-remote` | c8ce05c | nothing; 13/13, harness kept logging in through the hardened sshd |
+| `55-dashboard` | 33477d2 | `EnvironmentFile=` for a file ExecStartPre writes must carry `-`, or the pre-step never spawns |
+| `20-nvidia`/`25-ml` | 9842b27 | torch without numpy warns on every import; verifier read stderr with stdout |
+| `40-agents` | b7e83e0 | opencode musl build cannot exec on Ubuntu (no ld-musl); version-only stamp never reinstalled the repin |
+| `30-models`/`35-gpu-lock` | pending | builder running |
+| `50-console`/`52-branding` | pending | builder running |
+
+Verifiers all read their module's most recent run record, not the last run's.
+`run-all.sh` now exceeds 500 s because the builders' suites download real release assets
+for checksum assertions -- to be gated behind `CDL_NET_TESTS=1` with a `tests/run-net.sh`.
+
 **Wave 2 (me):** integrate, `run-all.sh`, full `run-vm.sh` on the clean VM, fix, iterate;
 then a cold `code-reviewer` over `install/`; then commit per module.
