@@ -88,6 +88,32 @@ id -nG "$candidate" | tr ' ' '\n' | grep -qx cdl \
     || die "45-remote: $candidate is still not in group cdl after usermod; refusing to write AllowGroups cdl (this would lock out all SSH access)"
 ok "user $candidate is in group cdl"
 
+# Group membership is necessary but not sufficient: PasswordAuthentication no means
+# $candidate also needs a way to actually authenticate. If there is no key and no
+# AuthorizedKeysCommand, writing the drop-in trades a working password login for nothing.
+candidate_home="$(getent passwd "$candidate" | cut -d: -f6)"
+authorized_keys="$candidate_home/.ssh/authorized_keys"
+has_key_line=0
+if [ -s "$authorized_keys" ] && grep -Eq '^(ssh-|ecdsa-|sk-)' "$authorized_keys"; then
+    has_key_line=1
+fi
+akc_line="$(sshd -T 2>/dev/null | awk '$1=="authorizedkeyscommand"{$1="";print}')"
+has_akc=0
+case "$akc_line" in ''|' none') has_akc=0 ;; *) has_akc=1 ;; esac
+
+if [ "$has_key_line" -eq 0 ] && [ "$has_akc" -eq 0 ]; then
+    if [ "${CDL_SSH_FORCE:-}" = "1" ]; then
+        warn "45-remote: $candidate has no key in $authorized_keys and no AuthorizedKeysCommand is configured; proceeding anyway because CDL_SSH_FORCE=1 -- add a key now or you will be locked out of SSH"
+    else
+        die "45-remote: $candidate has no key in $authorized_keys and sshd has no AuthorizedKeysCommand configured. Writing this drop-in now would lock out all SSH access (PasswordAuthentication is being set to no). Add a public key first, e.g.:
+    sudo -u $candidate mkdir -p $candidate_home/.ssh && sudo chmod 700 $candidate_home/.ssh
+    echo '<your public key>' | sudo -u $candidate tee -a $authorized_keys && sudo chmod 600 $authorized_keys
+Then re-run this module. To proceed anyway (not recommended), set CDL_SSH_FORCE=1."
+    fi
+else
+    ok "$candidate has SSH key access configured (authorized_keys or AuthorizedKeysCommand)"
+fi
+
 dropin=/etc/ssh/sshd_config.d/10-cdl.conf
 dropin_existed=0
 [ -f "$dropin" ] && dropin_existed=1
@@ -105,10 +131,11 @@ then changed=1; fi
 
 # Validate the file BEFORE touching the running daemon (spec §7 B1a). A bad write here is
 # reverted rather than left for the next reboot to discover.
-if ! sshd -t 2>/tmp/cdl-sshd-t.$$; then
+sshd_t_err="$(mktemp)"
+if ! sshd -t 2>"$sshd_t_err"; then
     err "sshd -t rejected the new config:"
-    sed 's/^/    /' /tmp/cdl-sshd-t.$$ >&2
-    rm -f /tmp/cdl-sshd-t.$$
+    sed 's/^/    /' "$sshd_t_err" >&2
+    rm -f "$sshd_t_err"
     if [ "$dropin_existed" -eq 1 ]; then
         # Backup filenames end in a UTC timestamp (see cdl_backup_file), which sorts
         # lexically in the same order as chronologically -- so the glob's own (sorted)
@@ -126,7 +153,7 @@ if ! sshd -t 2>/tmp/cdl-sshd-t.$$; then
     fi
     die "45-remote: refusing to reload sshd with an invalid config; previous state restored"
 fi
-rm -f /tmp/cdl-sshd-t.$$
+rm -f "$sshd_t_err"
 
 if [ "$changed" -eq 1 ] && cdl_have_systemd; then
     systemctl reload ssh 2>/dev/null || systemctl reload sshd 2>/dev/null \
@@ -156,6 +183,7 @@ ok "effective sshd config: passwordauthentication no, AllowGroups includes cdl"
 # --- (c) mosh --------------------------------------------------------------------------------
 cdl_apt_install mosh
 ok "mosh installed (UDP 60000-61000, per-session; see the firewalling note above)"
+warn "45-remote: mosh's UDP 60000-61000 is NOT restricted to the tailnet by this module; it is reachable from the LAN too until a firewall rule is added elsewhere (see the comment at the top of this file)"
 
 # --- (d) cdl-net-check -------------------------------------------------------------------------
 cdl_write_if_changed /usr/local/bin/cdl-net-check <<'EOF'

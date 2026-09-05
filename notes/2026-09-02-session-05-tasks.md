@@ -244,5 +244,20 @@ is 42 s again (63 files, 13 suites). `tests/run-net.sh` proven end to end on 202
 agents 56/56, nvidia-ml 82/82, models-gpu-lock 135/135, console 54/54 -- every pinned
 sha256 matched a fresh download of its asset.
 
+**Cold review (opus, 20 files) — 3 blockers, 7 should-fix, verdict REQUEST CHANGES:**
+
+| # | Finding | Status |
+|-|-|-|
+| B1 | `35-gpu-lock`: `ExecStopPost` runs under `User=$SUDO_USER`, so restore cannot `systemctl start` for any non-root caller; §6.1's SIGKILL guarantee void | with the models builder, who holds the VM; the VM independently showed 17/60 verifier failures of this class |
+| B2 | `15-btrfs` exit 1 stopped modules 20–60 on any ext4 machine — i.e. portable mode's only prerequisite | **fixed 5259e83** (skip) |
+| B3 | GPU detection via `lspci`, which nothing installs → silent CPU path on the Tensorbook | **fixed 5259e83** (sysfs vendor 0x10de); `cdl-ml-check` copy with the nvidia builder |
+| 4 | `gpu-telemetry.sh` emits `[N/A]` unquoted → invalid JSON → panel silently empty | dashboard builder |
+| 5 | `backup.conf` and `dashboard.env` told the operator to edit them, then got rewritten each run | backup half **fixed 5259e83** (seed once); dashboard half with its builder |
+| 6 | 11434 fence is a separate nft table; `nftables.service`'s `flush ruleset` would drop it while ollama serves 0.0.0.0 | models builder |
+| 7 | §8.1 Machine panel, requests served, largest models absent from the dashboard | dashboard builder |
+| 8 | `tailscale whois` as `cdl-dash` — LocalAPI permission unverified | dashboard builder (document + name the failure) |
+| 9 | sshd guard checks group but not that the user has an `authorized_keys` → password-only boxes lock out | remote builder |
+| 10 | `nvidia.txt` records the loaded driver version, which differs across the reboot → spurious "reboot required" on idle runs | nvidia builder |
+
 **Wave 2 (me):** integrate, `run-all.sh`, full `run-vm.sh` on the clean VM, fix, iterate;
 then a cold `code-reviewer` over `install/`; then commit per module.

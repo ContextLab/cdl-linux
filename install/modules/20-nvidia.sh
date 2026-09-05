@@ -230,13 +230,17 @@ else
 fi
 
 # --- 7. record what was installed ------------------------------------------------------------
-# Versions, not a timestamp: this file has to be identical on a second run, or the run is
-# not idempotent. What installed it is already in /var/log/cdl/install-runs.jsonl.
+# PACKAGED versions only, and no timestamp: this file has to be byte-identical on a second
+# run, or the run is not idempotent. The *loaded* driver version deliberately does not go in
+# here -- it is empty before the first reboot and a version string after it, so recording it
+# would rewrite the file on the first idle post-reboot run and re-print "A REBOOT IS
+# REQUIRED" on a machine that had already been rebooted. It is reported on stdout below
+# instead, where saying it twice costs nothing. What installed this is already in
+# /var/log/cdl/install-runs.jsonl.
 driver_ver="$(dpkg-query -W -f='${Version}' "nvidia-driver-${DRIVER_BRANCH}" 2>/dev/null)"
 utils_ver="$(dpkg-query -W -f='${Version}'  "nvidia-utils-${DRIVER_BRANCH}"  2>/dev/null)"
 cuda_ver="$(dpkg-query -W -f='${Version}'   "$cuda_pkg"                      2>/dev/null)"
 modules_ver="$(dpkg-query -W -f='${Version}' "$modules_pkg" 2>/dev/null || true)"
-runtime_ver="$(nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null | head -1)"
 
 if cdl_write_if_changed "$CDL_ETC/nvidia.txt" <<EOF
 $CDL_MANAGED
@@ -254,9 +258,16 @@ kernel_modules_version ${modules_ver:-none (DKMS fallback)}
 cuda_package          ${cuda_pkg}
 cuda_version          ${cuda_ver:-not-installed}
 cuda_source           ${NVIDIA_REPO}
-loaded_driver_version ${runtime_ver:-not-loaded (reboot required)}
 EOF
 then changed=1; fi
+
+# Reported, never recorded. Reading it must not influence `changed`.
+runtime_ver="$(nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null | head -1)"
+if [ -n "$runtime_ver" ]; then
+    dim "    loaded driver: $runtime_ver"
+else
+    dim "    loaded driver: none yet (the module loads at boot)"
+fi
 
 if [ "$changed" -eq 1 ]; then
     ok "driver ${driver_ver:-?}, CUDA ${cuda_ver:-?}; recorded in $CDL_ETC/nvidia.txt"
