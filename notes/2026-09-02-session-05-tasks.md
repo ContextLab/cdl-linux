@@ -236,11 +236,13 @@ green, second run idle):**
 | `20-nvidia`/`25-ml` | 9842b27 | torch without numpy warns on every import; verifier read stderr with stdout |
 | `40-agents` | b7e83e0 | opencode musl build cannot exec on Ubuntu (no ld-musl); version-only stamp never reinstalled the repin |
 | `30-models`/`35-gpu-lock` | pending | builder running |
-| `50-console`/`52-branding` | pending | builder running |
+| `50-console`/`52-branding` | pending VM | fast 49/49; **kmscon 9.3.2-1 is in 26.04 universe** (S4 not blocked); real logo fetched at install; three bugs the builder found by executing: template prose tripped its own placeholder guard, `die` made the logo fallback unreachable, `apt-cache` probed before `apt-get update` |
 
 Verifiers all read their module's most recent run record, not the last run's.
-`run-all.sh` now exceeds 500 s because the builders' suites download real release assets
-for checksum assertions -- to be gated behind `CDL_NET_TESTS=1` with a `tests/run-net.sh`.
+Network-bound checksum assertions are gated behind `CDL_NET_TESTS=1` (ce5c296); `run-all.sh`
+is 42 s again (63 files, 13 suites). `tests/run-net.sh` proven end to end on 2026-09-05:
+agents 56/56, nvidia-ml 82/82, models-gpu-lock 135/135, console 54/54 -- every pinned
+sha256 matched a fresh download of its asset.
 
 **Wave 2 (me):** integrate, `run-all.sh`, full `run-vm.sh` on the clean VM, fix, iterate;
 then a cold `code-reviewer` over `install/`; then commit per module.
