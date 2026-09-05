@@ -483,7 +483,7 @@ the wrapper, will take VRAM and the lock will not stop it.
 
 ## 6. Training and fine-tuning
 
-The stack, installed by `20-nvidia.sh` and `40-ml.sh`:
+The stack, installed by `20-nvidia.sh` and `25-ml.sh`:
 
 - NVIDIA driver from the Ubuntu archive (signed, loads under Secure Boot), CUDA toolkit,
   and `nvidia-smi` working as the acceptance check.

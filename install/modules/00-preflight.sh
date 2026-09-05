@@ -30,9 +30,17 @@ else
 fi
 
 if [ "$arch" != "$SUPPORTED_ARCH" ]; then
-    err "architecture is ${arch}, not ${SUPPORTED_ARCH}."
-    log "    The GPU and ML stack this configures exists for ${SUPPORTED_ARCH} only."
-    fail=1
+    if [ -n "${CDL_ALLOW_UNSUPPORTED_ARCH:-}" ]; then
+        # Test rigs only. The GPU modules skip themselves on any machine without an x86_64
+        # NVIDIA GPU, so everything else can be exercised on an arm64 VM; but a person
+        # running this on a Raspberry Pi should be told, not accommodated.
+        warn "architecture ${arch} is not supported; continuing because CDL_ALLOW_UNSUPPORTED_ARCH is set"
+        warn "    GPU modules will skip. This is a test configuration, not a supported machine."
+    else
+        err "architecture is ${arch}, not ${SUPPORTED_ARCH}."
+        log "    The GPU and ML stack this configures exists for ${SUPPORTED_ARCH} only."
+        fail=1
+    fi
 else
     ok "architecture ${arch}"
 fi
