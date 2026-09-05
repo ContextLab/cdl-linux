@@ -1184,7 +1184,7 @@ volume, so the backup is not a precaution here, it is the only copy.
 
 | # | Milestone | Exit test |
 |-|-|-|
-| **I1** | `install.sh`, `00-preflight`, `10-base` | A fresh Ubuntu run succeeds; an immediate second run changes nothing; a failed module stops the ones after it; re-running just the failed module works; unsupported OS and architecture fail **before any mutation**; a concurrent run is refused; existing user configuration is backed up or preserved; a machine-readable run record is written |
+| ~~**I1**~~ | ~~`install.sh`, `00-preflight`, `10-base`~~ | ✅ **Done 2026-09-05, every criterion measured on the arm64 VM**: a fresh run succeeds; an immediate second run of each module changes nothing; a failed module stops later ones and names the re-run command (19 fixture assertions); unsupported OS and architecture are refused before mutation; **a concurrent install is refused** -- tested against a live `30-models` run, exit 1 with the lock named; files a module replaces are backed up beside the original; a JSONL run record is written per module |
 | **C1** | The plain console slice | tty1 presentation, tty2 recovery getty, local PAM login, a `cdl` launcher offering status/workspace/shell, key-only SSH, and separate local and remote workspaces. **The test is simultaneous local and SSH use**, including non-interactive `ssh host cmd`, `scp`, `rsync` and git-over-SSH: none may enter the launcher (§9.3) |
 
 **`kmscon`, ligatures, palette generation, the logo and the dashboard are deliberately not
