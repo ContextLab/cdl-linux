@@ -80,7 +80,10 @@ if grep -q 'architecture is aarch64' <<<"$msg"; then ok "preflight names the wro
 
 # --- the btrfs module is a guard, not an attempt ---
 msg="$(bash "$repo/install/modules/15-btrfs-subvolumes.sh" 2>&1)"; rc3=$?
-check "15-btrfs-subvolumes refuses on a non-@ root" "$rc3" "1"
+# Exit 2 (skip), not 1: a machine without the subvolume layout is fully supported in
+# portable mode, and exit 1 here stopped every later module on exactly that machine. The
+# earlier assertion of "1" encoded the bug.
+check "15-btrfs-subvolumes SKIPS (exit 2) on a non-@ root, so later modules run" "$rc3" "2"
 if grep -q 'reinstall' <<<"$msg"; then ok "the guard says how to get the layout"; else bad "guard gives no route forward"; fi
 
 # A missing flock must be reported as a missing flock, not as a concurrent run.

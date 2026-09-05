@@ -24,8 +24,13 @@ cdl_apt_install restic rclone
 BACKUP_CONF="$CDL_ETC/backup.conf"
 PLACEHOLDER_BUCKET="CHANGEME"
 
-cdl_write_if_changed "$BACKUP_CONF" <<CONF
-$CDL_MANAGED
+# The operator edits this file, so the installer must never rewrite it. It writes the
+# CURRENT template to backup.conf.default on every run, and seeds backup.conf from it only
+# when absent. (Cold review: cdl_write_if_changed here reverted RESTIC_REPOSITORY to the
+# placeholder on the next ./install.sh while the timer stayed enabled -- nightly failures.)
+cdl_write_if_changed "$BACKUP_CONF.default" <<CONF
+# cdl-linux seeds this file once and never rewrites it; the installer's current template is
+# beside it as backup.conf.default.
 #
 # cdl-backup (run|check|restore|status) reads this file. Edit it in place; no restart is
 # needed, the next invocation picks it up.
@@ -45,6 +50,11 @@ RESTIC_REPOSITORY=rclone:hf:${PLACEHOLDER_BUCKET}/restic
 # one part that is not (/srv/models/keep) is out of scope for this backup.
 BACKUP_PATHS="/home /etc"
 CONF
+chmod 0600 "$BACKUP_CONF.default"
+if [ ! -e "$BACKUP_CONF" ]; then
+    cp "$BACKUP_CONF.default" "$BACKUP_CONF"
+    dim "    seeded $BACKUP_CONF (edited by hand from here on; the installer will not touch it)"
+fi
 chmod 0600 "$BACKUP_CONF"
 
 # --- /etc/cdl/backup.exclude ---------------------------------------------------------------

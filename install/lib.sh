@@ -19,6 +19,22 @@ err()  { printf '%sFAIL%s %s\n'    "$C_ERR"  "$C_OFF" "$*" >&2; }
 dim()  { printf '%s%s%s\n'         "$C_DIM"  "$*"     "$C_OFF" >&2; }
 die()  { err "$*"; exit 1; }
 
+# die() EXITS. So do the helpers below that call it: cdl_need_root, cdl_apt_install,
+# cdl_apt_source, cdl_fetch_verified, cdl_system_user and cdl_enable_now. That is the
+# intended behaviour -- a module that cannot install what it needs must stop -- but it
+# means none of them can be tested with a plain `if`:
+#
+#     if cdl_fetch_verified "$url" "$dest" "$sha"; then ... else <FALLBACK> fi
+#
+# The else branch there is unreachable. On failure the module exits and the fallback never
+# runs, which is worse than no fallback because the code says one is there. When a module
+# genuinely has something to fall back to, run the call in a subshell so the exit becomes
+# a status the `if` can read (the fetched file still lands on disk):
+#
+#     if ( cdl_fetch_verified "$url" "$dest" "$sha" ); then ... else <FALLBACK> fi
+#
+# 52-branding.sh does this for the boot logo, and tests/test-console.sh asserts it.
+
 # --- module exit contract ----------------------------------------------------------------
 # 0  the module's work is done (whether it acted or found nothing to do)
 # 2  the module does not apply to this machine, and that is not an error
@@ -70,7 +86,17 @@ cdl_pkg_present() { dpkg-query -W -f='${Status}' "$1" 2>/dev/null | grep -q '^in
 # --- hardware and platform ---------------------------------------------------------------
 cdl_is_x86_64()     { [ "$(cdl_arch)" = x86_64 ]; }
 # NVIDIA present on the PCI bus. Not "driver loaded": that is what 20-nvidia establishes.
-cdl_has_nvidia_gpu() { [ -n "${CDL_FAKE_NVIDIA:-}" ] || lspci 2>/dev/null | grep -qi 'nvidia'; }
+# Read from sysfs, which needs no package: the earlier `lspci | grep` treated a MISSING
+# lspci (pciutils is not installed by anything here) as "no GPU", which would have sent the
+# Tensorbook silently down the CPU-torch path. Vendor 0x10de is NVIDIA.
+cdl_has_nvidia_gpu() {
+    [ -n "${CDL_FAKE_NVIDIA:-}" ] && return 0
+    local v
+    for v in /sys/bus/pci/devices/*/vendor; do
+        [ -r "$v" ] && [ "$(cat "$v" 2>/dev/null)" = "0x10de" ] && return 0
+    done
+    return 1
+}
 # GPU-dependent modules call this first and skip cleanly elsewhere. Every other machine --
 # the arm64 VM, a laptop without a discrete GPU -- gets everything else.
 cdl_require_gpu_or_skip() {

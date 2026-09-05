@@ -18,15 +18,21 @@
 # scripts/vm/autoinstall/user-data.
 
 set -uo pipefail
+# shellcheck source-path=SCRIPTDIR source=../lib.sh
+source "$(dirname "$0")/../lib.sh"
 
 opts="$(findmnt -no OPTIONS / 2>/dev/null || true)"
 if [[ "$opts" == *"subvol=/@"* ]]; then
-    printf '\033[32m ok:\033[0m root is already on @; nothing to do.\n'
+    ok "root is already on @; nothing to do"
     exit 0
 fi
 
+# SKIP, not fail. A machine without the layout is fully supported in portable mode (§1.2),
+# and exit 1 here stopped every later module on exactly the machine portable mode names as
+# its only prerequisite -- a stock ext4 Ubuntu Server. Caught in cold review, not by the VM,
+# whose root is on @.
 cat >&2 <<'MSG'
-fatal: this machine's root is not on the @ subvolume, and that cannot be fixed from here.
+note: this machine's root is not on the @ subvolume, and that cannot be added from here.
 
   The migration only works during installation, when nothing is running from the
   filesystem. Attempting it live fails two different ways (see the comments at the top of
@@ -38,4 +44,4 @@ fatal: this machine's root is not on the @ subvolume, and that cannot be fixed f
   The machine is otherwise fine without it. What is lost is §11.4's rollback, which needs a
   snapshot of root, and a top-level root cannot be snapshotted.
 MSG
-exit 1
+skip "15-btrfs-subvolumes: no subvolume layout on this machine (portable mode); later modules continue"
