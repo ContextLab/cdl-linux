@@ -268,5 +268,77 @@ out="$(bash "$BIN/cdl-gpu-powercap" 2>&1)"; rc=$?
 check "cdl-gpu-powercap exits 0 when nvidia-smi is absent" "$rc" "0"
 if grep -q 'nvidia-smi absent' <<<"$out"; then ok "cdl-gpu-powercap says why it did nothing"; else bad "cdl-gpu-powercap said: $out"; fi
 
+# --- the silent failure this script exists to prevent ------------------------------------------
+printf '\n-- GPU present, CUDA missing --\n'
+# `lspci | grep -qi nvidia` answers "no GPU" when pciutils is simply not installed, and
+# nothing here installs it. On the Tensorbook that turns a broken CUDA install into
+# "ok (no NVIDIA GPU here)" and exit 0. Both directions are exercised below against a fixture
+# sysfs tree and a REAL torch that genuinely reports torch.cuda.is_available() == False --
+# which is every torch on this Mac, so nothing is stubbed.
+# Executable lines only: the comment above the sysfs loop names lspci in order to say why it
+# is not used, and a guard that cannot tell those apart is a guard that has to be deleted the
+# first time somebody documents something.
+if grep -vE '^[[:space:]]*#' "$BIN/cdl-ml-check" | grep -q 'lspci'; then
+    bad "cdl-ml-check still detects the GPU with lspci"
+else
+    ok "cdl-ml-check does not depend on lspci"
+fi
+has "cdl-ml-check reads the PCI vendor id from sysfs" '0x10de' "$BIN/cdl-ml-check"
+
+mkdir -p "$work/sys-gpu/0000:01:00.0" "$work/sys-nogpu/0000:00:02.0" "$work/venv/bin"
+printf '0x10de\n' > "$work/sys-gpu/0000:01:00.0/vendor"
+printf '0x8086\n' > "$work/sys-nogpu/0000:00:02.0/vendor"
+
+torch_py=""
+for cand in python3 python3.14 python3.13 python3.12 python3.11; do
+    if command -v "$cand" >/dev/null 2>&1 && "$cand" -c 'import torch' >/dev/null 2>&1; then
+        torch_py="$(command -v "$cand")"; break
+    fi
+done
+
+if [ -z "$torch_py" ]; then
+    bad "no python on this machine can import torch, so the GPU-without-CUDA assertion did not run"
+else
+    ok "found a real torch to test against ($torch_py)"
+    ln -sf "$torch_py" "$work/venv/bin/python"
+
+    out="$(CDL_SYS_PCI="$work/sys-gpu" CDL_ML_VENV="$work/venv" bash "$BIN/cdl-ml-check" 2>&1)"; rc=$?
+    check "cdl-ml-check exits nonzero when a GPU is present and CUDA is not" "$rc" "1"
+    if grep -q 'cannot use it' <<<"$out"; then
+        ok "it says the GPU is there and torch cannot use it"
+    else
+        bad "it did not name the GPU/CUDA mismatch: $out"
+    fi
+    if grep -q 'no NVIDIA GPU here' <<<"$out"; then
+        bad "it claimed there is no GPU while looking at a sysfs tree containing one"
+    else
+        ok "it did not claim the GPU was absent"
+    fi
+
+    # The other direction, so the check is not simply always-fail.
+    out="$(CDL_SYS_PCI="$work/sys-nogpu" CDL_ML_VENV="$work/venv" bash "$BIN/cdl-ml-check" 2>&1)"; rc=$?
+    check "cdl-ml-check exits 0 when no NVIDIA device is on the bus" "$rc" "0"
+    if grep -q 'no NVIDIA GPU here' <<<"$out"; then ok "and says a CPU build is the right answer there"; else bad "unexpected output: $out"; fi
+fi
+
+# --- nvidia.txt stays byte-identical across a reboot ---------------------------------------------
+printf '\n-- nvidia.txt is idempotent across a reboot --\n'
+# The loaded driver version is empty before the first reboot and a version string after it, so
+# recording it would rewrite the file and re-announce the reboot on an idle run.
+if grep -q 'loaded_driver_version' "$NVIDIA"; then
+    bad "nvidia.txt records the loaded driver version, which changes at the first reboot"
+else
+    ok "nvidia.txt records packaged versions only"
+fi
+# shellcheck disable=SC2016  # a literal sed address; expansion is exactly what must not happen
+record_block="$(sed -n '/cdl_write_if_changed "\$CDL_ETC\/nvidia.txt"/,/^EOF$/p' "$NVIDIA")"
+if grep -q 'nvidia-smi' <<<"$record_block"; then
+    bad "the nvidia.txt heredoc calls nvidia-smi, whose output changes at the first reboot"
+else
+    ok "nothing in the nvidia.txt heredoc comes from nvidia-smi"
+fi
+# It is still reported, just not recorded.
+has "the loaded driver version is still reported on stdout" 'loaded driver:' "$NVIDIA"
+
 printf '\n  test-nvidia-ml: %d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

@@ -13,7 +13,11 @@
 
 set -uo pipefail
 
-VENV=/opt/cdl/ml
+# CDL_ML_VENV and CDL_SYS_PCI are never set in normal use. They exist so the one branch that
+# matters most -- a GPU is present and torch cannot use it -- can be exercised on a machine
+# that has no GPU, instead of being a path nobody has ever seen run. Same purpose as lib.sh's
+# CDL_OS_RELEASE.
+VENV="${CDL_ML_VENV:-/opt/cdl/ml}"
 PY="$VENV/bin/python"
 
 fail() { printf 'cdl-ml-check: FAIL %s\n' "$*" >&2; exit 1; }
@@ -22,8 +26,17 @@ fail() { printf 'cdl-ml-check: FAIL %s\n' "$*" >&2; exit 1; }
 
 # The same test lib.sh's cdl_has_nvidia_gpu uses, repeated here because an installed script
 # cannot source the repository it came from.
+#
+# Read from sysfs, NOT from `lspci`. Nothing in this project installs pciutils, and on a box
+# without it `lspci | grep -qi nvidia` fails silently -- so a Tensorbook whose CUDA install is
+# broken would print "ok (no NVIDIA GPU here)" and exit 0, which is the exact failure this
+# script exists to catch. Vendor 0x10de is NVIDIA.
+SYS_PCI="${CDL_SYS_PCI:-/sys/bus/pci/devices}"
 gpu_present=0
-if lspci 2>/dev/null | grep -qi 'nvidia'; then gpu_present=1; fi
+for vendor in "$SYS_PCI"/*/vendor; do
+    [ -r "$vendor" ] || continue
+    if [ "$(cat "$vendor" 2>/dev/null)" = "0x10de" ]; then gpu_present=1; break; fi
+done
 
 export CDL_GPU_PRESENT="$gpu_present"
 "$PY" - <<'PY'
