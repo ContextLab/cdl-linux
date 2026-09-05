@@ -25,8 +25,8 @@ command -v shellcheck >/dev/null 2>&1 || { have_shellcheck=0; echo "  shellcheck
 #
 # The set is globbed explicitly rather than found recursively, so adding a directory of
 # scripts is a visible edit here instead of a silent change in coverage.
-for f in install.sh install/*.sh install/modules/*.sh install/installer/*.sh \
-         scripts/*.sh scripts/vm/*.sh scripts/vm/fixture/*.sh tests/*.sh; do
+for f in install.sh install/*.sh install/modules/*.sh install/installer/*.sh install/dashboard/*.sh \
+         scripts/*.sh scripts/vm/*.sh scripts/vm/fixture/*.sh tests/*.sh tests/vm/*.sh; do
     [[ -e "$f" ]] || continue
     lint_files=$((lint_files + 1))
     if ! bash -n "$f"; then

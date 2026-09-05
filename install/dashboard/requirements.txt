@@ -1,0 +1,4 @@
+# Pinned, verified present on PyPI at authoring time (curl -s https://pypi.org/pypi/<pkg>/<ver>/json).
+# Bump deliberately; see spec sec 11.3 on pinned CLI/tooling refresh.
+fastapi==0.115.6
+uvicorn==0.32.1
