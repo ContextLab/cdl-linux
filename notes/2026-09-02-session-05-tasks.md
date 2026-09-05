@@ -43,7 +43,15 @@ itself is the remaining open item.
     already-migrated target exits 0; a non-mountpoint is refused; a target on the same
     device but not on `@` is refused by the partial-migration guard with two recovery
     routes, leaving all three subvolumes untouched.
-- [ ] **B2. Second backup copy** (§10.2 `rclone copy` pull from another machine).
+- [x] **B2. Second backup copy: DONE 2026-09-04.** `scripts/backup/pull-second-copy.sh`,
+  15 assertions against the real bucket. Survives a wipe, an empty re-pull, visible
+  corruption, a same-size/same-mtime look-alike, and silent local rot. Three measured
+  findings: `--checksum` is *worse* on this gateway (no hash reads as "same"), `--immutable`
+  is beaten by an attacker who preserves mtime, and restic names every file by the SHA-256
+  of its content so the puller verifies cryptographically with no password.
+- [!] **B0. Back up the Tensorbook that exists today.** Blocked: the machine is not
+  reachable from here. Remaining: first real backup, restore on another machine, one
+  restore from the second copy, and the owner's name in `notes/`.
 
 ## Open: subiquity cannot copy its own logs into the target
 

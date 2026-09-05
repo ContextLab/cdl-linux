@@ -974,6 +974,10 @@ nothing else, which is how a safeguard ends up existing on paper only:
 
 ### 10.3 What is backed up
 
+**Nightly**, by a `restic backup` timer. This was previously unstated, and the omission
+mattered: the recovery-point objective in §10.2 cannot be defined without it. With a nightly
+backup and a daily pull, the bucket is at most 24 h behind and the second copy at most 48 h.
+
 - `/home` and `/etc`, with `--exclude-caches` so `CACHEDIR.TAG` directories drop out. The
   Hugging Face cache writes that tag, so the model cache is excluded for free.
 - **`/srv/models` is not backed up.** Weights are re-downloadable and large. Checkpoints and
@@ -1052,6 +1056,44 @@ its own backup history, so the second copy is not a theoretical precaution.
 return a last-modified time restic's rclone transport expects. It is noise: `check
 --read-data` verified every pack and reported no errors.
 
+### 10.6 The second copy, measured 2026-09-04
+
+`scripts/backup/pull-second-copy.sh` is the mechanism, `scripts/backup/README.md` the
+operations, and `tests/net-second-copy.sh` runs both against the real bucket. Fifteen
+assertions pass. What they establish, in the order an attacker would try things:
+
+| Event | Outcome |
+|-|-|
+| The bucket is wiped | Restore from the second copy alone is byte-identical |
+| Pull again from the wiped bucket | Nothing is deleted locally |
+| A bucket file is replaced with different content | The pull refuses and the local file is untouched |
+| Replaced with the **same size and mtime** | rclone skips it; it never enters the second copy |
+| A local file rots without its mtime changing | Detected by content hash; the run fails and says the copy is not trustworthy |
+
+**Three findings changed the design, and none was in the documentation.**
+
+`--checksum` makes the copy *less* safe against this gateway. It returns no content hash,
+and rclone reads "no hash" as "same", so same-size corruption passes. The flag is not used.
+
+`--immutable` is necessary and not sufficient. It compares size and mtime; rclone sets the
+local mtime from the remote on pull, so an overwrite in the bucket is caught by its new
+mtime -- unless the attacker preserves it. Measured: preserving it to the second is enough.
+
+**Every restic file is named by the SHA-256 of its content** -- keys, index, snapshots and
+data were all checked -- so the puller verifies the copy cryptographically **with no
+repository password**. That check runs on every pull whatever rclone reported, because
+bit-rot changes content and not mtime and is otherwise invisible. It is the check that
+holds when the other two do not, and it keeps the password with the person (§10.2).
+
+**One boundary is deliberate.** The puller keeps a copy it can vouch for; it does not audit
+the bucket. A same-size look-alike in the bucket is the box's problem, and
+`restic check --read-data` on the box is what finds it.
+
+**What this does not establish: B0.** The machine that exists today has not been backed up,
+because it is not reachable from here. The mechanism is proven; the first real backup, the
+restore of it on another machine, and the named owner in `notes/` are the operator's to do
+before either NVMe is touched.
+
 ## 11. Updates, logs and maintenance
 
 Draft 1 had no update policy at all, which for an always-on machine is a gap rather than an
@@ -1129,7 +1171,8 @@ destructive storage setup and recovery.
 | ~~**S1**~~ | ~~Does `restic` work against the HF S3 gateway?~~ | ✅ **Done 2026-09-02, and it changed the design** (§10.5). Direct S3 cannot `init`; `restic` over `rclone` passes all seven steps including restore-and-diff and `prune`. `rclone` is now a dependency |
 | ~~**S2**~~ | ~~Rehearse the storage install in a VM~~ | ✅ **Done 2026-09-03.** md/LUKS/btrfs/`/boot`/unlock all work; **curtin creates no subvolumes** (§2.1.2). Superseded by V4 |
 | ~~**V4**~~ | ~~The subvolume migration, proven~~ | ✅ **Done 2026-09-04**: three consecutive installs, 21/21 storage checks, 30/30 fixture checks, refusal paths exercised live. Criteria were: **two clean installs from empty disks.** Root on `subvol=/@`; `/home` and `/srv/models` on their subvolumes; SSH key login works after reboot; every fixture entry survives with content, ownership, mode, link count, symlink target, xattrs and ACLs intact; `fstab`, `crypttab`, md assembly, GRUB and initramfs all verify; a second run of the migration recognises the completed state and exits 0; and an injected failure at each stage either recovers or leaves instructions a person can follow |
-| **B0** | **Back up the machine that exists today, and prove the backup is real** | Back up `/home` and `/etc` to the bucket, restore to scratch storage on a *different* machine, and diff. Then build the §10.2 second copy, define its owner, schedule, retention, capacity alert and failure alert, restore **from it**, and record the recovery-point objective. **Record explicitly that T5 is open** -- a write-capable token on the box can erase the bucket -- and that RAID0 is accepted on those terms |
+| **B0** | **Back up the machine that exists today, and prove the backup is real** | Needs the Tensorbook. Back up `/home` and `/etc` to the bucket, restore to scratch storage on a *different* machine, and diff. Name the second copy's owner in `notes/`. Run one restore **from the second copy**. **Record explicitly that T5 is open** -- a write-capable token on the box can erase the bucket -- and that RAID0 is accepted on those terms |
+| ~~**B2**~~ | ~~The second copy, proven~~ | ✅ **Done 2026-09-04** (§10.6): survives a wipe, an empty re-pull, visible corruption, a same-size look-alike and silent local rot; 15 assertions against the real bucket. Owner, schedule, retention, capacity floor, failure alert and RPO are defined in `scripts/backup/README.md` |
 
 **RAID0 stays blocked until B0 passes.** Striping means either drive failing destroys the
 volume, so the backup is not a precaution here, it is the only copy.
@@ -1170,7 +1213,7 @@ that needs finding out before the model-serving and agent layers are built on to
 
 | # | Question | Why it is open |
 |-|-|-|
-| 1 | Which machine holds the second backup copy, and how often does it pull? | §10.2 makes a second copy a requirement rather than advice, because the HF bucket has no versioning and no lifecycle rules. The pull schedule sets how long a wipe can go unnoticed. (The earlier question here, whether `restic` works against the gateway, was answered by spike S1 on 2026-09-02: not directly, but through `rclone` -- §10.5) |
+| 1 | Which machine holds the second backup copy? | **Half answered.** How often, retention, capacity, alerting and RPO are defined (`scripts/backup/README.md`, §10.6). *Which machine*, and *whose name goes in `notes/`*, remain the operator's to state -- the repository is public and does not name people |
 | 2 | Can one stored copy serve both Ollama and `llama-server`? | **S3 in §12.** Decides whether `/srv/models` holds one copy of a model or two |
 | 3 | Are `croft` and the Emacs LLM integration still wanted? | Both came from the original requirements list, which predates the console-first decision |
 | 4 | Is a UPS worth buying? | §7.1: it converts the commonest cause of an unattended reboot from an office trip into nothing. Cheap, and outside this spec |

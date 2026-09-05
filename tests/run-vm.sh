@@ -48,4 +48,9 @@ step "verify the migration fixture"
 step "backup round trip"
 ./scripts/vm/test-backup.sh || fatal "backup round trip failed"
 
+step "second copy survives the threat it exists for"
+# Needs the network and this machine's credentials, not the VM. It lives here rather than
+# in run-all.sh because it takes a minute and talks to a real bucket.
+./tests/net-second-copy.sh || fatal "second-copy test failed"
+
 printf '\n\033[32mVM CYCLE PASSED\033[0m\n'
