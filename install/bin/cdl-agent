@@ -1,0 +1,218 @@
+#!/usr/bin/env bash
+# managed by cdl-linux; edits here are overwritten by ./install.sh
+#
+# cdl-agent: the per-process credential launcher for the agent CLIs (spec §4.1, §4.2).
+#
+# Reads ~/.config/cdl/keys (KEY=value lines), refuses to use it unless it is mode 0600 and
+# owned by the invoking user, and exports only the variables one named agent needs into
+# only that one process. Nothing is ever written to a shell profile or /etc/environment --
+# see spec §4.1 for why (Claude Code's Remote Control refuses to run under several
+# privacy/gateway variables that a global default would have set for everyone).
+set -uo pipefail
+
+CDL_KEYS_FILE="${CDL_KEYS_FILE:-$HOME/.config/cdl/keys}"
+CDL_SESSION_DIR="${CDL_SESSION_DIR:-$HOME/.local/state/cdl/sessions}"
+AGENTS="claude codex gemini opencode"
+
+_err() { printf 'cdl-agent: %s\n' "$*" >&2; }
+_die() { _err "$*"; exit 1; }
+
+_usage() {
+    cat <<'EOF'
+usage: cdl-agent [--no-log] <agent> [args...]
+       cdl-agent list
+       cdl-agent [--print-env] <agent>
+
+agents: claude codex gemini opencode
+
+  --no-log      do not wrap the session in script(1), even inside a workspace
+  --print-env   print the variable NAMES (never values) that would be exported for
+                <agent>, then exit without running it
+EOF
+}
+
+# --- credentials file: refuse rather than guess (spec §4.1) ---------------------------
+# GNU stat and BSD stat take incompatible flags; try both rather than assuming Linux,
+# since the test suite for this script runs on macOS.
+_cdl_agent_stat() { stat -c '%a %U' "$1" 2>/dev/null || stat -f '%Lp %Su' "$1" 2>/dev/null; }
+
+# Prints nothing and returns 0 if $1 is usable (or absent). Otherwise prints the problem
+# and returns 1. Never exits -- callers decide whether that is fatal.
+_cdl_keys_file_problem() {
+    local f="$1" info mode owner
+    [ -e "$f" ] || return 0
+    info="$(_cdl_agent_stat "$f")" || { printf 'cannot stat %s' "$f"; return 1; }
+    mode="${info%% *}"; owner="${info#* }"
+    if [ "$mode" != "600" ]; then
+        printf "%s is mode %s, must be 0600 (fix: chmod 600 '%s')" "$f" "$mode" "$f"; return 1
+    fi
+    if [ "$owner" != "$(id -un)" ]; then
+        printf "%s is owned by '%s', not '%s' (fix: chown %s '%s')" "$f" "$owner" "$(id -un)" "$(id -un)" "$f"
+        return 1
+    fi
+    return 0
+}
+_cdl_check_keys_file() {   # dies with _cdl_keys_file_problem's message, if any
+    local msg
+    msg="$(_cdl_keys_file_problem "$1")" || _die "$msg"
+    return 0
+}
+
+declare -A CDL_KEYS=()
+_cdl_load_keys() {
+    local f="$1" line k v
+    [ -e "$f" ] || return 0
+    while IFS= read -r line || [ -n "$line" ]; do
+        case "$line" in ''|'#'*) continue ;; esac
+        k="${line%%=*}"; v="${line#*=}"
+        [ "$k" = "$line" ] && continue
+        CDL_KEYS["$k"]="$v"
+    done < "$f"
+}
+_have_key() { [ -n "${CDL_KEYS[$1]+x}" ] && [ -n "${CDL_KEYS[$1]}" ]; }
+
+# --- which variables an agent gets, and only those (spec §4.1) ------------------------
+declare -a CDL_EXPORT_NAMES=()
+_cdl_agent_vars() {
+    CDL_EXPORT_NAMES=()
+    case "$1" in
+        claude)
+            # ANTHROPIC_BASE_URL, DISABLE_TELEMETRY, DO_NOT_TRACK,
+            # CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC and DISABLE_GROWTHBOOK each disable
+            # Claude Code's Remote Control (phone steering) outright (spec §4.1). None of
+            # them is ever set here, regardless of what the keys file contains.
+            _have_key ANTHROPIC_API_KEY && CDL_EXPORT_NAMES+=(ANTHROPIC_API_KEY)
+            ;;
+        codex)
+            _have_key OPENAI_API_KEY && CDL_EXPORT_NAMES+=(OPENAI_API_KEY)
+            ;;
+        gemini)
+            _have_key GEMINI_API_KEY && CDL_EXPORT_NAMES+=(GEMINI_API_KEY)
+            ;;
+        opencode)
+            # opencode has no single credential variable of its own; it resolves
+            # providers through the models.dev registry, which reads each provider's own
+            # standard variable. Both spellings of the divergent ones go out together,
+            # per spec §4.1, derived from the one canonical value in the keys file.
+            _have_key ANTHROPIC_API_KEY && CDL_EXPORT_NAMES+=(ANTHROPIC_API_KEY)
+            _have_key OPENAI_API_KEY    && CDL_EXPORT_NAMES+=(OPENAI_API_KEY)
+            _have_key GEMINI_API_KEY    && CDL_EXPORT_NAMES+=(GEMINI_API_KEY)
+            if _have_key OPENROUTER_API_KEY; then
+                CDL_KEYS[OR_API_KEY]="${CDL_KEYS[OPENROUTER_API_KEY]}"
+                CDL_EXPORT_NAMES+=(OPENROUTER_API_KEY OR_API_KEY)
+            fi
+            if _have_key TOGETHER_API_KEY; then
+                CDL_KEYS[TOGETHERAI_API_KEY]="${CDL_KEYS[TOGETHER_API_KEY]}"
+                CDL_EXPORT_NAMES+=(TOGETHER_API_KEY TOGETHERAI_API_KEY)
+            fi
+            if _have_key FIREWORKS_API_KEY; then
+                CDL_KEYS[FIREWORKS_AI_API_KEY]="${CDL_KEYS[FIREWORKS_API_KEY]}"
+                CDL_EXPORT_NAMES+=(FIREWORKS_API_KEY FIREWORKS_AI_API_KEY)
+            fi
+            ;;
+        *) _die "unknown agent '$1' (try: $AGENTS)" ;;
+    esac
+}
+_cdl_agent_export_all() {
+    local n
+    for n in "${CDL_EXPORT_NAMES[@]:-}"; do
+        [ -n "$n" ] || continue
+        export "${n}=${CDL_KEYS[$n]}"
+    done
+}
+
+_cdl_agent_bin() {
+    case "$1" in
+        claude|codex|gemini|opencode) printf '%s' "$1" ;;
+        *) _die "unknown agent '$1' (try: $AGENTS)" ;;
+    esac
+}
+
+# --- claude: vendor installer, on first use, never at install time (spec §4) -----------
+_install_claude_vendor() {
+    cat >&2 <<EOF
+cdl-agent: Claude Code is not installed. cdl-linux does not redistribute it -- its
+repository carries no licence field, so it cannot be (spec §4). About to run, as
+$(id -un):
+
+    curl -fsSL https://claude.ai/install.sh | bash
+
+EOF
+    curl -fsSL https://claude.ai/install.sh | bash || _die "the Claude Code installer failed"
+    hash -r 2>/dev/null || true
+}
+
+# --- list: never a value, only names and yes/no (spec: cdl-agent list) ----------------
+_cmd_list() {
+    local a bin problem
+    if [ -e "$CDL_KEYS_FILE" ]; then
+        if problem="$(_cdl_keys_file_problem "$CDL_KEYS_FILE")"; then
+            _cdl_load_keys "$CDL_KEYS_FILE"
+        else
+            _err "keys file present but refused: $problem"
+        fi
+    fi
+    printf '%-10s %-10s %s\n' agent installed keys
+    for a in $AGENTS; do
+        bin="$(_cdl_agent_bin "$a")"
+        _cdl_agent_vars "$a"
+        if command -v "$bin" >/dev/null 2>&1; then
+            printf '%-10s %-10s %s\n' "$a" yes "${CDL_EXPORT_NAMES[*]:-none}"
+        else
+            printf '%-10s %-10s %s\n' "$a" no "${CDL_EXPORT_NAMES[*]:-none}"
+        fi
+    done
+}
+
+# --- argument parsing -------------------------------------------------------------------
+[ $# -ge 1 ] || { _usage; exit 1; }
+
+case "$1" in
+    list)      shift; _cmd_list "$@"; exit 0 ;;
+    -h|--help) _usage; exit 0 ;;
+esac
+
+print_env=0
+no_log=0
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --print-env) print_env=1; shift ;;
+        --no-log)    no_log=1; shift ;;
+        --)          shift; break ;;
+        -*)          _die "unknown flag '$1' (try --help)" ;;
+        *)           break ;;
+    esac
+done
+[ $# -ge 1 ] || _die "missing agent name (try: $AGENTS)"
+agent="$1"; shift
+bin="$(_cdl_agent_bin "$agent")"   # dies on an unknown agent name
+
+_cdl_check_keys_file "$CDL_KEYS_FILE"
+_cdl_load_keys "$CDL_KEYS_FILE"
+_cdl_agent_vars "$agent"
+
+if [ "$print_env" -eq 1 ]; then
+    printf '%s\n' "${CDL_EXPORT_NAMES[@]:-}"
+    exit 0
+fi
+
+if [ "$agent" = claude ] && ! command -v claude >/dev/null 2>&1; then
+    _install_claude_vendor
+fi
+command -v "$bin" >/dev/null 2>&1 || _die "$bin is not installed"
+
+_cdl_agent_export_all
+
+# §4.2: agent sessions inside a workspace are logged by default via script(1); --no-log
+# opts out per session. ZELLIJ is set by zellij inside a session, which is what "inside a
+# workspace" means here -- §9.3's `cdl workspace` always runs agents under zellij.
+if [ -n "${ZELLIJ:-}" ] && [ "$no_log" -eq 0 ] && command -v script >/dev/null 2>&1; then
+    mkdir -p "$CDL_SESSION_DIR"
+    chmod 0700 "$CDL_SESSION_DIR"
+    logf="$CDL_SESSION_DIR/${agent}-$(date -u +%Y%m%dT%H%M%SZ).log"
+    : > "$logf"; chmod 0600 "$logf"
+    cmd="$(printf '%q ' "$bin" "$@")"
+    exec script -qefc "$cmd" "$logf"
+fi
+
+exec "$bin" "$@"

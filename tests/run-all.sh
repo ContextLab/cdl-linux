@@ -25,7 +25,13 @@ command -v shellcheck >/dev/null 2>&1 || { have_shellcheck=0; echo "  shellcheck
 #
 # The set is globbed explicitly rather than found recursively, so adding a directory of
 # scripts is a visible edit here instead of a silent change in coverage.
-for f in install.sh install/*.sh install/modules/*.sh install/installer/*.sh install/dashboard/*.sh \
+# install/files/console holds the scripts the console module INSTALLS (as /usr/local/bin/cdl
+# and friends). They carry no .sh suffix because that is not their name on the target, so
+# they are listed individually rather than globbed: palette.conf and the zshrc sit in the
+# same directory, are not bash, and must not be linted as if they were.
+for f in install.sh install/*.sh install/bin/* install/modules/*.sh install/installer/*.sh install/dashboard/*.sh \
+         install/files/console/cdl install/files/console/cdl-palette-apply \
+         install/files/console/cdl-palette-check install/files/console/motd-10-cdl \
          scripts/*.sh scripts/vm/*.sh scripts/vm/fixture/*.sh tests/*.sh tests/vm/*.sh; do
     [[ -e "$f" ]] || continue
     lint_files=$((lint_files + 1))
