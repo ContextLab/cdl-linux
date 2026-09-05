@@ -798,7 +798,9 @@ against the things it obviously removes.
 
 `kmscon` is a KMS/DRM console emulator that runs in userspace and replaces the kernel VT. It
 renders through freetype or pango rather than a bitmap table, so it does TrueType rasterising
-**and shaping**, which is what ligatures need. It is actively maintained (10.0.0, May 2026)
+**and shaping**, which is what ligatures need. It is actively maintained upstream (10.0.0, May 2026); **what Ubuntu 26.04 ships is `kmscon` 9.3.2-1, in universe, on both architectures** -- measured from the archive index and the `.deb` itself on 2026-09-05 (`notes/research/2026-09-05-console-package-verification.md`), which also confirmed `mod-pango.so` and `font-engine=pango` are present, so shaping is real in the packaged build.
+
+Two traps in the packaged unit, both asserted in the suite: enabling the bare `kmsconvt@.service`, as its own README suggests, aliases `autovt@` and puts kmscon on tty2 as well, breaking §9.2 -- the module enables the `@tty1` instance only. And the unit already carries `Conflicts=`/`OnFailure=getty@tty1`, which *is* the fallback this section asks for; masking `getty@tty1` would delete it
 and **is in the Ubuntu archive**, so this costs an `apt install` rather than a compositor.
 
 What that buys, and what it does not: it gives real fonts and ligatures on the machine's own
