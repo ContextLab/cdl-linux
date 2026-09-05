@@ -85,7 +85,7 @@ multiple owners that has to survive intact, before it goes near a machine with w
 
 ## Where this stands
 
-The design is specified and none of it is installed on the Tensorbook yet. Several of its riskiest questions have been answered by experiment rather than by argument, and two of those experiments changed the design.
+The design is specified, the install script and its modules are built, and none of it is installed on the Tensorbook yet. Every module has been run on a virtual Ubuntu 26.04 machine with real systemd, apt and services: each installs, passes its own in-guest checks, and changes nothing on a second run. The GPU modules skip there by design and are the part only the laptop can prove. A cold review of the code found three defects the virtual machine structurally could not, all on that laptop-only path or in what the script refuses; two are fixed and one is in hand. Several of its riskiest questions have been answered by experiment rather than by argument, and two of those experiments changed the design.
 
 The backup path was one. Testing it showed that `restic` cannot initialise a repository on a Hugging Face bucket through its own S3 support at all, because it reads the account namespace as the bucket name. Routed through `rclone` instead, every step passes, including a byte-identical restore. That added a dependency the design did not previously have.
 

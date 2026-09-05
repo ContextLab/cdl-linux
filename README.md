@@ -44,7 +44,8 @@ command to re-run. There is no uninstall; reinstalling Ubuntu is the documented 
 | `35-gpu-lock` | `cdl-gpu train -- …`: exclusive GPU, stops the model servers, restarts exactly those it stopped — even if the job is `SIGKILL`ed |
 | `40-agents` | Codex, OpenCode, Gemini CLI as pinned, checksummed binaries; Claude Code via its vendor installer on first use; `cdl-agent` builds each one's credentials per process |
 | `45-remote` | Tailscale, key-only SSH (`AllowGroups cdl`, verified with `sshd -T`), mosh, `cdl-net-check` |
-| `50-console` | Palette, Fira Code + Nerd symbols via `kmscon` on tty1 (tty2 stays plain), zsh prompt, zellij layout, `/etc/issue`, the `cdl` launcher, GRUB and Plymouth branding |
+| `50-console` | Palette (contrast-checked), Fira Code + Nerd symbols via `kmscon` on tty1 (tty2 stays a plain getty), zsh prompt, zellij layout, `/etc/issue`, the `cdl` launcher |
+| `52-branding` | GRUB menu with a visible Recovery entry; Plymouth theme with the lab's logo centred and the LUKS prompt beneath, Escape showing the boot log |
 | `55-dashboard` | One read-only page, bound to the tailnet, authenticated by `tailscale whois` |
 | `60-backup` | `restic` nightly over `rclone`; unconfigured until you say where |
 
@@ -54,11 +55,16 @@ After login, type `cdl`. It is never started for you: a launcher in `.profile` w
 ## Verifying it
 
 ```bash
-tests/run-all.sh      # fast: lint, every module's unit tests, the seed validator
+tests/run-all.sh      # fast (~1 min): lint, every module's unit tests, the seed validator
+tests/run-net.sh      # the checksum assertions that download real release assets (~3 GB)
 tests/run-vm.sh       # a full install, reboot, storage and fixture checks, then install.sh
                       # on the booted machine, every module's own verifier, and a second
                       # run that must change nothing
 ```
+
+The VM is arm64, so it exercises everything except the GPU modules, which skip there and
+can only be proven on the Tensorbook. `CDL_ALLOW_UNSUPPORTED_ARCH=1` is what lets
+`install.sh` run on that test rig; without it a non-x86_64 machine is refused.
 
 ## Where the reasoning is
 
