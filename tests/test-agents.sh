@@ -77,46 +77,58 @@ if [ -n "$opencode_version" ]; then ok "40-agents pins an opencode version ($ope
 if [ -n "$gemini_version" ]; then ok "40-agents pins a gemini-cli version ($gemini_version)"; else bad "no GEMINI_VERSION"; fi
 
 # codex: two arches, two pinned checksums
-for spec in "x86_64:CODEX_SHA256_X86_64:codex-x86_64-unknown-linux-musl.tar.gz" \
-            "aarch64:CODEX_SHA256_AARCH64:codex-aarch64-unknown-linux-musl.tar.gz"; do
-    IFS=: read -r arch var asset <<<"$spec"
-    want="$(sed -n "s/^${var}=\\(.*\\)\$/\\1/p" "$MODULE")"
-    if [[ "$want" =~ ^[0-9a-f]{64}$ ]]; then ok "40-agents has a codex $arch sha256"; else bad "$var is not a sha256: '$want'"; fi
-    url="https://github.com/openai/codex/releases/download/${codex_tag}/${asset}"
-    dest="$work/$asset"
-    if curl -fsSL --retry 2 -o "$dest" "$url"; then
-        got="$(sha256_of "$dest")"
-        check "codex $codex_version $arch sha256 matches a fresh download" "$got" "$want"
-        if tar tzf "$dest" | grep -qx "codex-${arch}-unknown-linux-musl"; then
-            ok "codex $arch tarball contains the single binary 40-agents expects"
+# Real downloads, gated: hundreds of megabytes and a network do not belong in the fast
+# suite. tests/run-net.sh sets CDL_NET_TESTS=1 and runs these on purpose.
+if [ -n "${CDL_NET_TESTS:-}" ]; then
+    for spec in "x86_64:CODEX_SHA256_X86_64:codex-x86_64-unknown-linux-musl.tar.gz" \
+                "aarch64:CODEX_SHA256_AARCH64:codex-aarch64-unknown-linux-musl.tar.gz"; do
+        IFS=: read -r arch var asset <<<"$spec"
+        want="$(sed -n "s/^${var}=\\(.*\\)\$/\\1/p" "$MODULE")"
+        if [[ "$want" =~ ^[0-9a-f]{64}$ ]]; then ok "40-agents has a codex $arch sha256"; else bad "$var is not a sha256: '$want'"; fi
+        url="https://github.com/openai/codex/releases/download/${codex_tag}/${asset}"
+        dest="$work/$asset"
+        if curl -fsSL --retry 2 -o "$dest" "$url"; then
+            got="$(sha256_of "$dest")"
+            check "codex $codex_version $arch sha256 matches a fresh download" "$got" "$want"
+            if tar tzf "$dest" | grep -qx "codex-${arch}-unknown-linux-musl"; then
+                ok "codex $arch tarball contains the single binary 40-agents expects"
+            else
+                bad "codex $arch tarball layout is not what 40-agents expects"
+            fi
         else
-            bad "codex $arch tarball layout is not what 40-agents expects"
+            bad "could not download $url (the checksum assertion did not run)"
         fi
-    else
-        bad "could not download $url (the checksum assertion did not run)"
-    fi
-done
+    done
+else
+    printf '  skip  codex archive checksums vs fresh downloads (set CDL_NET_TESTS=1, or run tests/run-net.sh)\n'
+fi
 
 # opencode: two arches, two pinned checksums, different asset-name arch spelling
-for spec in "x86_64:OPENCODE_SHA256_X86_64:opencode-linux-x64.tar.gz" \
-            "aarch64:OPENCODE_SHA256_AARCH64:opencode-linux-arm64.tar.gz"; do
-    IFS=: read -r arch var asset <<<"$spec"
-    want="$(sed -n "s/^${var}=\\(.*\\)\$/\\1/p" "$MODULE")"
-    if [[ "$want" =~ ^[0-9a-f]{64}$ ]]; then ok "40-agents has an opencode $arch sha256"; else bad "$var is not a sha256: '$want'"; fi
-    url="https://github.com/sst/opencode/releases/download/v${opencode_version}/${asset}"
-    dest="$work/$asset"
-    if curl -fsSL --retry 2 -o "$dest" "$url"; then
-        got="$(sha256_of "$dest")"
-        check "opencode $opencode_version $arch sha256 matches a fresh download" "$got" "$want"
-        if tar tzf "$dest" | grep -qx "opencode"; then
-            ok "opencode $arch tarball contains the single binary 40-agents expects"
+# Real downloads, gated: hundreds of megabytes and a network do not belong in the fast
+# suite. tests/run-net.sh sets CDL_NET_TESTS=1 and runs these on purpose.
+if [ -n "${CDL_NET_TESTS:-}" ]; then
+    for spec in "x86_64:OPENCODE_SHA256_X86_64:opencode-linux-x64.tar.gz" \
+                "aarch64:OPENCODE_SHA256_AARCH64:opencode-linux-arm64.tar.gz"; do
+        IFS=: read -r arch var asset <<<"$spec"
+        want="$(sed -n "s/^${var}=\\(.*\\)\$/\\1/p" "$MODULE")"
+        if [[ "$want" =~ ^[0-9a-f]{64}$ ]]; then ok "40-agents has an opencode $arch sha256"; else bad "$var is not a sha256: '$want'"; fi
+        url="https://github.com/sst/opencode/releases/download/v${opencode_version}/${asset}"
+        dest="$work/$asset"
+        if curl -fsSL --retry 2 -o "$dest" "$url"; then
+            got="$(sha256_of "$dest")"
+            check "opencode $opencode_version $arch sha256 matches a fresh download" "$got" "$want"
+            if tar tzf "$dest" | grep -qx "opencode"; then
+                ok "opencode $arch tarball contains the single binary 40-agents expects"
+            else
+                bad "opencode $arch tarball layout is not what 40-agents expects"
+            fi
         else
-            bad "opencode $arch tarball layout is not what 40-agents expects"
+            bad "could not download $url (the checksum assertion did not run)"
         fi
-    else
-        bad "could not download $url (the checksum assertion did not run)"
-    fi
-done
+    done
+else
+    printf '  skip  opencode archive checksums vs fresh downloads (set CDL_NET_TESTS=1, or run tests/run-net.sh)\n'
+fi
 
 x86="$(sed -n 's/^CODEX_SHA256_X86_64=\(.*\)$/\1/p' "$MODULE")"
 arm="$(sed -n 's/^CODEX_SHA256_AARCH64=\(.*\)$/\1/p' "$MODULE")"

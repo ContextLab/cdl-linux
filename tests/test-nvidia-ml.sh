@@ -133,22 +133,28 @@ sha256_of() {
 
 # A real download, because the point of a checksum is that somebody fetched the bytes it
 # describes. Offline, this fails and says so; it does not pass quietly.
-for spec in "x86_64-unknown-linux-gnu:$sha_x86" "aarch64-unknown-linux-gnu:$sha_arm"; do
-    triple="${spec%%:*}"; want="${spec##*:}"
-    url="https://github.com/astral-sh/uv/releases/download/${uv_version}/uv-${triple}.tar.gz"
-    dest="$work/uv-$triple.tar.gz"
-    if curl -fsSL --retry 2 -o "$dest" "$url"; then
-        got="$(sha256_of "$dest")"
-        check "uv $uv_version $triple sha256 matches a fresh download" "$got" "$want"
-        if tar tzf "$dest" | grep -qx "uv-${triple}/uv"; then
-            ok "$triple tarball contains uv-${triple}/uv, which is what 25-ml extracts"
+# Real downloads, gated: hundreds of megabytes and a network do not belong in the fast
+# suite. tests/run-net.sh sets CDL_NET_TESTS=1 and runs these on purpose.
+if [ -n "${CDL_NET_TESTS:-}" ]; then
+    for spec in "x86_64-unknown-linux-gnu:$sha_x86" "aarch64-unknown-linux-gnu:$sha_arm"; do
+        triple="${spec%%:*}"; want="${spec##*:}"
+        url="https://github.com/astral-sh/uv/releases/download/${uv_version}/uv-${triple}.tar.gz"
+        dest="$work/uv-$triple.tar.gz"
+        if curl -fsSL --retry 2 -o "$dest" "$url"; then
+            got="$(sha256_of "$dest")"
+            check "uv $uv_version $triple sha256 matches a fresh download" "$got" "$want"
+            if tar tzf "$dest" | grep -qx "uv-${triple}/uv"; then
+                ok "$triple tarball contains uv-${triple}/uv, which is what 25-ml extracts"
+            else
+                bad "$triple tarball layout is not what 25-ml expects"
+            fi
         else
-            bad "$triple tarball layout is not what 25-ml expects"
+            bad "could not download $url (the checksum assertion did not run)"
         fi
-    else
-        bad "could not download $url (the checksum assertion did not run)"
-    fi
-done
+    done
+else
+    printf '  skip  uv tarball checksums vs fresh downloads (set CDL_NET_TESTS=1, or run tests/run-net.sh)\n'
+fi
 
 # The torch pins name a wheel that has to exist for the interpreter on the target machine.
 # Ubuntu 26.04's default python3 is 3.14 (python3 3.14.3-0ubuntu2 in resolute), so cp314 is
