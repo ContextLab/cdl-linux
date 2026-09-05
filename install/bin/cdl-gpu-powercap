@@ -1,0 +1,67 @@
+#!/usr/bin/env bash
+# managed by cdl-linux; edits here are overwritten by ./install.sh
+#
+# Applies spec §2.3's GPU power cap at boot, from /etc/cdl/gpu.conf.
+#
+# §2.3 gives the GPU a power-cap policy and is explicit that its numbers are provisional:
+# they are "equally provisional and equally due for measurement under B4". So the values
+# live in /etc/cdl/gpu.conf, which says the same thing, rather than being frozen here.
+#
+# What §2.3 actually specifies is a *range*, not a boot value: a floor of 80 W, a ceiling of
+# "the card's default", and 15 W steps driven by temperature. The boot value is therefore the
+# ceiling -- the card's own default limit -- and this script's job at boot is to put the card
+# in a known state, so a cap left behind by a previous run of the (future) cdl-thermal daemon
+# cannot survive as an unexplained performance loss. Set CDL_GPU_POWER_CAP_W to a number in
+# gpu.conf to start capped instead.
+#
+# Installed to /usr/local/bin/cdl-gpu-powercap by install/modules/20-nvidia.sh and run by
+# cdl-gpu-powercap.service.
+
+set -uo pipefail
+
+CONF=/etc/cdl/gpu.conf
+
+CDL_GPU_POWER_CAP_W=default
+CDL_GPU_POWER_FLOOR_W=80
+# shellcheck source=/dev/null
+[ -r "$CONF" ] && . "$CONF"
+
+command -v nvidia-smi >/dev/null 2>&1 || { echo "cdl-gpu-powercap: nvidia-smi absent; nothing to do" >&2; exit 0; }
+
+# No GPU is not a failure: this unit is enabled on a machine that has one, and a card that is
+# missing at boot is the driver's problem to report, not this script's to crash on.
+if ! limits="$(nvidia-smi --query-gpu=power.default_limit,power.min_limit,power.max_limit \
+                          --format=csv,noheader,nounits 2>/dev/null)" || [ -z "$limits" ]; then
+    echo "cdl-gpu-powercap: nvidia-smi reported no GPU; not applying a cap" >&2
+    exit 0
+fi
+
+# Integer watts. nvidia-smi prints e.g. "175.00, 5.00, 175.00".
+read -r def min max <<<"$(printf '%s' "$limits" | head -1 | tr -d ' ' | tr ',' ' ')"
+def=${def%%.*}; min=${min%%.*}; max=${max%%.*}
+
+case "$CDL_GPU_POWER_CAP_W" in
+    default|"") want="$def" ;;
+    *[!0-9]*)   echo "cdl-gpu-powercap: CDL_GPU_POWER_CAP_W='$CDL_GPU_POWER_CAP_W' is not a number or 'default'" >&2; exit 1 ;;
+    *)          want="$CDL_GPU_POWER_CAP_W" ;;
+esac
+
+# §2.3's floor, then the card's own enforceable range. A cap outside what the card accepts is
+# a configuration error worth naming, not a silent clamp to something nobody asked for.
+if [ "$want" -lt "$CDL_GPU_POWER_FLOOR_W" ]; then
+    echo "cdl-gpu-powercap: ${want}W is below §2.3's ${CDL_GPU_POWER_FLOOR_W}W floor; using the floor" >&2
+    want="$CDL_GPU_POWER_FLOOR_W"
+fi
+if [ "$want" -lt "$min" ] || [ "$want" -gt "$max" ]; then
+    echo "cdl-gpu-powercap: ${want}W is outside what this card accepts (${min}-${max}W); using ${def}W" >&2
+    want="$def"
+fi
+
+if ! out="$(nvidia-smi -pl "$want" 2>&1)"; then
+    echo "cdl-gpu-powercap: nvidia-smi -pl $want failed: $out" >&2
+    exit 1
+fi
+
+printf 'cdl-gpu-powercap: power limit set to %sW (card default %sW, range %s-%sW)\n' \
+    "$want" "$def" "$min" "$max"
+exit 0

@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+# managed by cdl-linux; edits here are overwritten by ./install.sh
+#
+# The acceptance check for §12's G1, and the one thing 20-nvidia cannot verify itself:
+# the driver only loads after a reboot. Exit 0 means the kernel module is loaded, nvidia-smi
+# runs, and it names a GPU. Anything else is a nonzero exit and a sentence saying which.
+#
+# Installed to /usr/local/bin/cdl-gpu-check by install/modules/20-nvidia.sh.
+
+set -uo pipefail
+
+fail() { printf 'cdl-gpu-check: FAIL %s\n' "$*" >&2; exit 1; }
+
+command -v nvidia-smi >/dev/null 2>&1 \
+    || fail "nvidia-smi is not installed (run: sudo ./install.sh --module 20-nvidia)"
+
+# A driver that is installed but not loaded is the normal state between install and the
+# first reboot, and it must not look like a broken card.
+if [ ! -e /dev/nvidiactl ] && ! grep -q '^nvidia ' /proc/modules 2>/dev/null; then
+    fail "the nvidia kernel module is not loaded. If 20-nvidia has just run, reboot first."
+fi
+
+if ! out="$(nvidia-smi --query-gpu=name,driver_version,memory.total --format=csv,noheader 2>&1)"; then
+    fail "nvidia-smi ran but returned an error: $out"
+fi
+
+[ -n "$out" ] || fail "nvidia-smi reported no GPU"
+
+# One line per GPU, so a machine with none is a failure rather than silent success.
+n=0
+while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    n=$((n + 1))
+    printf 'cdl-gpu-check: %s\n' "$line"
+done <<<"$out"
+
+[ "$n" -gt 0 ] || fail "nvidia-smi produced no GPU rows"
+printf 'cdl-gpu-check: ok (%d GPU)\n' "$n"
+exit 0

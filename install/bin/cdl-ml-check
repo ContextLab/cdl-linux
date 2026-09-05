@@ -1,0 +1,63 @@
+#!/usr/bin/env bash
+# managed by cdl-linux; edits here are overwritten by ./install.sh
+#
+# Reports what the shared ML environment actually has: the torch version, its build variant,
+# and whether CUDA is usable. The one thing it treats as a failure is the mismatch that
+# matters -- an NVIDIA GPU on the PCI bus and a torch that cannot see it. On a machine with
+# no GPU, a CPU torch is the correct answer and this exits 0.
+#
+# Together with cdl-gpu-check this is §12's G1 acceptance test, which is only meaningful
+# after a reboot.
+#
+# Installed to /usr/local/bin/cdl-ml-check by install/modules/25-ml.sh.
+
+set -uo pipefail
+
+VENV=/opt/cdl/ml
+PY="$VENV/bin/python"
+
+fail() { printf 'cdl-ml-check: FAIL %s\n' "$*" >&2; exit 1; }
+
+[ -x "$PY" ] || fail "$PY does not exist (run: sudo ./install.sh --module 25-ml)"
+
+# The same test lib.sh's cdl_has_nvidia_gpu uses, repeated here because an installed script
+# cannot source the repository it came from.
+gpu_present=0
+if lspci 2>/dev/null | grep -qi 'nvidia'; then gpu_present=1; fi
+
+export CDL_GPU_PRESENT="$gpu_present"
+"$PY" - <<'PY'
+import os
+import sys
+
+try:
+    import torch
+except Exception as exc:                       # noqa: BLE001 - any import failure is fatal here
+    print(f"cdl-ml-check: FAIL cannot import torch: {exc}", file=sys.stderr)
+    sys.exit(1)
+
+gpu_present = os.environ.get("CDL_GPU_PRESENT") == "1"
+cuda_built = torch.version.cuda                # None for a CPU-only build
+cuda_ok = torch.cuda.is_available()
+
+print(f"cdl-ml-check: torch {torch.__version__}")
+print(f"cdl-ml-check: built against CUDA {cuda_built or 'none (CPU build)'}")
+print(f"cdl-ml-check: torch.cuda.is_available() = {cuda_ok}")
+
+if cuda_ok:
+    for i in range(torch.cuda.device_count()):
+        print(f"cdl-ml-check: device {i}: {torch.cuda.get_device_name(i)}")
+
+if gpu_present and not cuda_ok:
+    print(
+        "cdl-ml-check: FAIL an NVIDIA GPU is on the PCI bus but torch cannot use it. "
+        "If 20-nvidia has just run, reboot; otherwise check cdl-gpu-check.",
+        file=sys.stderr,
+    )
+    sys.exit(1)
+
+if not gpu_present:
+    print("cdl-ml-check: ok (no NVIDIA GPU here; CPU torch is correct)")
+else:
+    print("cdl-ml-check: ok")
+PY

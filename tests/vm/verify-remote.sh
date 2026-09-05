@@ -25,8 +25,9 @@ if [ -f "$RECORD" ]; then
     result="$(python3 - "$RECORD" <<'PY'
 import json, sys
 rows = [json.loads(line) for line in open(sys.argv[1]) if line.strip()]
-last = rows[-1]["run"] if rows else None
-mine = [r for r in rows if r["run"] == last and r["module"] == "45-remote"]
+# The module's most recent record, whatever run it belongs to: requiring it in the LAST run
+# fails under per-module iteration, where the last run is whichever module ran most recently.
+mine = [r for r in rows if r["module"] == "45-remote"]
 print(mine[-1]["result"] if mine else "did-not-run")
 PY
 )"
