@@ -196,3 +196,34 @@ the evidence, not to the test.
 | GPU | Exclusive workload. Training stops inference, runs, restarts it. Serving need not continue through training. |
 | Storage | Striped (user's call, against recommendation). md0 RAID0 → LUKS → btrfs with `@`, `@home`, `@models`. |
 | Unlock | Passphrase only, typed at the machine. No remote unlock, no TPM. |
+
+## 2026-09-05: building the workstation itself (ultrawork)
+
+User: backup is the most minor piece; build the *meat* and get `install.sh` working. Scope
+is the verbatim `:38` request (agent CLIs, Ollama, local models/training, remote tools,
+CLI theming) plus `:58` (Fira Code + ligatures, CDL palette, logo centred at boot).
+
+**Wave 0 (done, d0454a6):** shared module contract in `install/lib.sh`; preflight
+`CDL_ALLOW_UNSUPPORTED_ARCH` for the arm64 test VM; `scripts/vm/install-in-guest.sh`;
+`tests/run-vm.sh` workstation steps (full install → per-module `tests/vm/verify-*.sh` →
+second run must change nothing); clean VM snapshot at `$VM_WORK/clean/` with
+`restore-clean.sh`.
+
+**Wave 1 (running, 7 builder subagents in parallel, none commit):**
+
+| Module | Builder | Ships |
+|-|-|-|
+| `20-nvidia`, `25-ml` | opus | driver+CUDA (skips off x86_64/NVIDIA), uv + torch venv `/opt/cdl/ml`, `cdl-gpu-check`, `cdl-ml-check` |
+| `30-models`, `35-gpu-lock` | opus | Ollama 11434 (tailnet+lo), llama-swap 8081 (lo), service users + §3.4 hardening, `cdl-models`, `cdl-gpu train` with systemd-based restore |
+| `40-agents` | sonnet | codex/opencode/gemini pinned binaries, Claude Code via vendor installer on first use, `cdl-agent` per-process creds (§4.1), transcript logging |
+| `45-remote` | sonnet | Tailscale apt, sshd key-only + AllowGroups cdl verified via `sshd -T`, mosh, `cdl-net-check` |
+| `50-console` | opus | palette.conf → kmscon/setvtrgb/zsh/zellij/CSS generator + contrast check, Fira Code + Symbols Nerd Font via kmscon on tty1, zsh prompt, zellij layout, /etc/issue + motd, `cdl` launcher, GRUB + Plymouth with the **real** logo (context-lab.com/images/CDL_Avatar.png, WebP 533², accent #00703c) |
+| `55-dashboard` | sonnet | FastAPI read-only, tailnet-bound, `tailscale whois` auth, GPU telemetry via root timer → `/run/cdl/gpu.json` |
+| `60-backup` | sonnet | minimal: restic timer nightly, excludes, `cdl-backup` |
+
+Each ships `tests/test-<module>.sh` (macOS, in `run-all.sh`) and `tests/vm/verify-<module>.sh`
+(inside the guest, run by `run-vm.sh`). Docker Desktop hangs mid-start on this Mac — do
+not call `docker` without a hard timeout; the VM is the integration target.
+
+**Wave 2 (me):** integrate, `run-all.sh`, full `run-vm.sh` on the clean VM, fix, iterate;
+then a cold `code-reviewer` over `install/`; then commit per module.
