@@ -42,6 +42,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import sys
 import time
 import urllib.error
 import urllib.request
@@ -79,6 +80,26 @@ _ZELLIJ_CANDIDATES = [
 HTTP_TIMEOUT = float(os.environ.get("CDL_DASH_HTTP_TIMEOUT", "1.5"))
 CACHE_SECONDS = float(os.environ.get("CDL_DASH_CACHE_SECONDS", "1"))
 LOOPBACK_IPS = {"127.0.0.1", "::1"}
+
+# sec 8.1's Machine panel: CPU temperature, max_perf_pct, load, memory. Every path is
+# overridable so tests/test-dashboard.sh can exercise the parsing with fixtures -- this
+# Mac has neither /sys/class/thermal in the Linux shape nor intel_pstate, so the defaults
+# themselves cannot be exercised off the real box.
+PROC_MEMINFO = Path(os.environ.get("CDL_PROC_MEMINFO", "/proc/meminfo"))
+SYS_THERMAL_ROOT = Path(os.environ.get("CDL_SYS_THERMAL_ROOT", "/sys/class/thermal"))
+SYS_MAX_PERF_PCT = Path(
+    os.environ.get(
+        "CDL_SYS_MAX_PERF_PCT", "/sys/devices/system/cpu/intel_pstate/max_perf_pct"
+    )
+)
+
+# sec 8.1's "largest models", under the Storage panel. Ollama's store is read-write for the
+# ollama user and the gguf store is read-only for llama (sec 3.4); this process reads both.
+MODELS_ROOTS = [
+    Path(os.environ.get("CDL_MODELS_OLLAMA_DIR", "/srv/models/ollama")),
+    Path(os.environ.get("CDL_MODELS_GGUF_DIR", "/srv/models/gguf")),
+]
+LARGEST_MODELS_LIMIT = int(os.environ.get("CDL_DASH_LARGEST_MODELS", "5"))
 
 BUILTIN_PALETTE_CSS = """/* built-in fallback palette: /etc/cdl/palette.css was absent */
 :root {
@@ -130,6 +151,19 @@ def _http_get_json(url: str) -> Optional[Any]:
         return None
 
 
+def _read_int_file(path: Path) -> Optional[int]:
+    try:
+        return int(path.read_text().strip())
+    except (OSError, ValueError):
+        return None
+
+
+def _unavailable(reason: str) -> dict:
+    """A value this box genuinely cannot produce: null, with the reason stated rather than
+    the field being silently omitted (this repo's accuracy rule)."""
+    return {"value": None, "reason": reason}
+
+
 # --- data sources --------------------------------------------------------------------------
 
 
@@ -144,16 +178,43 @@ def get_smart() -> list:
     return data if isinstance(data, list) else []
 
 
-def get_ollama() -> Optional[dict]:
+def get_ollama() -> dict:
     tags = _http_get_json(f"{OLLAMA_BASE}/api/tags")
     if tags is None:
-        return None
+        return {
+            "up": False,
+            "tags": None,
+            "ps": None,
+            "requests_served": _unavailable(f"ollama unreachable on {OLLAMA_BASE}"),
+        }
     ps = _http_get_json(f"{OLLAMA_BASE}/api/ps")
-    return {"tags": tags, "ps": ps}
+    return {
+        "up": True,
+        "tags": tags,
+        "ps": ps,
+        # sec 8.1 asks for "requests served"; Ollama's HTTP API exposes only /api/tags and
+        # /api/ps (both read here), neither of which carries a request counter.
+        "requests_served": _unavailable(
+            "Ollama's HTTP API (/api/tags, /api/ps) exposes no request counter"
+        ),
+    }
 
 
-def get_llama_swap() -> Optional[Any]:
-    return _http_get_json(f"{LLAMA_SWAP_BASE}/running")
+def get_llama_swap() -> dict:
+    running = _http_get_json(f"{LLAMA_SWAP_BASE}/running")
+    if running is None:
+        return {
+            "up": False,
+            "running": None,
+            "requests_served": _unavailable(f"llama-swap unreachable on {LLAMA_SWAP_BASE}"),
+        }
+    return {
+        "up": True,
+        "running": running,
+        "requests_served": _unavailable(
+            "llama-swap's /running endpoint exposes no request counter"
+        ),
+    }
 
 
 def get_sessions() -> list:
@@ -188,6 +249,26 @@ def _disk_usage(path: str) -> Optional[dict]:
         return None
 
 
+def get_largest_models() -> dict:
+    """sec 8.1's "largest models", under the Storage panel."""
+    present_roots = [r for r in MODELS_ROOTS if r.is_dir()]
+    if not present_roots:
+        return {
+            "models": [],
+            "reason": "none of " + ", ".join(str(r) for r in MODELS_ROOTS) + " exist yet",
+        }
+    entries = []
+    for root in present_roots:
+        for p in root.rglob("*"):
+            try:
+                if p.is_file():
+                    entries.append({"path": str(p), "size_bytes": p.stat().st_size})
+            except OSError:
+                continue
+    entries.sort(key=lambda e: e["size_bytes"], reverse=True)
+    return {"models": entries[:LARGEST_MODELS_LIMIT], "reason": None}
+
+
 def get_storage() -> dict:
     # Sec 8.1: @, @home and @models share one btrfs pool, so these three usually read as the
     # same free figure. All three are still returned so the frontend can show one number
@@ -196,6 +277,84 @@ def get_storage() -> dict:
         "root": _disk_usage("/"),
         "home": _disk_usage("/home"),
         "models": _disk_usage("/srv/models"),
+        "largest_models": get_largest_models(),
+    }
+
+
+# --- machine (sec 8.1: CPU temperature, max_perf_pct, load, memory) -------------------------
+
+
+def get_cpu_temperature_c() -> dict:
+    if not SYS_THERMAL_ROOT.is_dir():
+        return _unavailable(f"{SYS_THERMAL_ROOT} not present")
+    fallback = None
+    for zone in sorted(SYS_THERMAL_ROOT.glob("thermal_zone*")):
+        try:
+            zone_type = (zone / "type").read_text().strip()
+        except OSError:
+            continue
+        millideg = _read_int_file(zone / "temp")
+        if millideg is None:
+            continue
+        reading = {"value": millideg / 1000.0, "reason": None, "zone": zone_type}
+        # The package/CPU zone is the one sec 8.1 means; prefer it if present, but a machine
+        # without one (e.g. this Mac, or an ARM board) still gets whatever zone exists.
+        if zone_type in ("x86_pkg_temp", "cpu-thermal", "coretemp"):
+            return reading
+        fallback = fallback or reading
+    return fallback or _unavailable(f"no readable thermal zone under {SYS_THERMAL_ROOT}")
+
+
+def get_max_perf_pct() -> dict:
+    v = _read_int_file(SYS_MAX_PERF_PCT)
+    if v is None:
+        return _unavailable(
+            f"{SYS_MAX_PERF_PCT} not present (not the intel_pstate driver, or none loaded)"
+        )
+    return {"value": v, "reason": None}
+
+
+def get_load() -> Optional[dict]:
+    try:
+        one, five, fifteen = os.getloadavg()
+    except OSError:
+        return None
+    return {"load1": one, "load5": five, "load15": fifteen}
+
+
+def get_memory() -> dict:
+    try:
+        text = PROC_MEMINFO.read_text()
+    except OSError:
+        return {
+            "total_kib": None,
+            "available_kib": None,
+            "used_kib": None,
+            "reason": f"{PROC_MEMINFO} not present",
+        }
+    fields: dict = {}
+    for line in text.splitlines():
+        key, _, rest = line.partition(":")
+        rest = rest.strip().split()
+        if key in ("MemTotal", "MemAvailable") and rest and rest[0].isdigit():
+            fields[key] = int(rest[0])
+    total = fields.get("MemTotal")
+    avail = fields.get("MemAvailable")
+    used = (total - avail) if (total is not None and avail is not None) else None
+    return {
+        "total_kib": total,
+        "available_kib": avail,
+        "used_kib": used,
+        "reason": None if total is not None and avail is not None else "MemTotal/MemAvailable not found",
+    }
+
+
+def get_machine() -> dict:
+    return {
+        "cpu_temperature_c": get_cpu_temperature_c(),
+        "max_perf_pct": get_max_perf_pct(),
+        "load": get_load(),
+        "memory": get_memory(),
     }
 
 
@@ -245,6 +404,7 @@ def build_status() -> dict:
         "llama_swap": get_llama_swap(),
         "sessions": get_sessions(),
         "storage": get_storage(),
+        "machine": get_machine(),
         "backup": get_backup(),
         "tailscale": get_tailscale_self(),
     }
@@ -257,6 +417,12 @@ def build_status() -> dict:
 
 
 def real_tailscale_whois(ip: str) -> Optional[dict]:
+    # cdl-dash is an unprivileged, non-operator account (see install/modules/55-dashboard.sh
+    # for exactly what tailscaled requires for this to succeed: `sudo tailscale
+    # set --operator=cdl-dash`, done by a human, once). Until that is done, every call here
+    # fails with a permission error against tailscaled's LocalAPI socket -- which is a safe
+    # failure (refuse the request) but a silent one unless it says why, so every failure logs
+    # the subprocess's own stderr rather than just returning None.
     try:
         out = subprocess.run(
             ["tailscale", "whois", "--json", ip],
@@ -265,10 +431,18 @@ def real_tailscale_whois(ip: str) -> Optional[dict]:
             check=True,
         )
         return json.loads(out.stdout)
-    except (OSError, subprocess.SubprocessError, ValueError):
-        # Binary absent, tailscaled not running, timeout, unparseable output, or a nonzero
-        # exit (tailscale whois exits nonzero for an IP it does not recognise) -- every one
-        # of these means "cannot vouch for this caller", so every one of them refuses.
+    except FileNotFoundError:
+        print(f"cdl-dash whois failed for {ip}: tailscale is not installed", file=sys.stderr)
+        return None
+    except subprocess.TimeoutExpired:
+        print(f"cdl-dash whois failed for {ip}: tailscale whois timed out", file=sys.stderr)
+        return None
+    except subprocess.CalledProcessError as exc:
+        stderr = (exc.stderr or b"").decode(errors="replace").strip()
+        print(f"cdl-dash whois failed for {ip}: {stderr or exc}", file=sys.stderr)
+        return None
+    except (OSError, ValueError) as exc:
+        print(f"cdl-dash whois failed for {ip}: {exc}", file=sys.stderr)
         return None
 
 
@@ -361,6 +535,7 @@ _PAGE_HTML = """<!doctype html>
   <div class="panel"><h2>Model servers</h2><pre id="p-models">loading...</pre></div>
   <div class="panel"><h2>Sessions</h2><pre id="p-sessions">loading...</pre></div>
   <div class="panel"><h2>Storage</h2><pre id="p-storage">loading...</pre></div>
+  <div class="panel"><h2>Machine</h2><pre id="p-machine">loading...</pre></div>
   <div class="panel"><h2>SMART</h2><pre id="p-smart">loading...</pre></div>
   <div class="panel"><h2>Backup</h2><pre id="p-backup">loading...</pre></div>
 </div>
@@ -390,7 +565,11 @@ async function poll() {
     : "no sessions";
   const st = s.storage;
   document.getElementById("p-storage").textContent = "free: " +
-    (st.root ? fmtBytes(st.root.free) + " / " + fmtBytes(st.root.total) : "?");
+    (st.root ? fmtBytes(st.root.free) + " / " + fmtBytes(st.root.total) : "?") +
+    "\\nlargest models: " + (st.largest_models.models.length
+      ? st.largest_models.models.map(m => m.path + " (" + fmtBytes(m.size_bytes) + ")").join("\\n  ")
+      : st.largest_models.reason);
+  document.getElementById("p-machine").textContent = JSON.stringify(s.machine, null, 2);
   document.getElementById("p-smart").textContent = s.smart.length
     ? JSON.stringify(s.smart, null, 2) : "no NVMe telemetry";
   document.getElementById("p-backup").textContent = s.backup ? JSON.stringify(s.backup, null, 2) : "no backup recorded yet";

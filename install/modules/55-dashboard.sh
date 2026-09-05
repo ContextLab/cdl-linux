@@ -41,6 +41,23 @@
 # The spec does not name one for the dashboard (only Ollama's 11434 and llama-swap's 8081
 # are pinned, in §5.1). 8080 is used here and is overridable via CDL_DASH_PORT in
 # /etc/cdl/dashboard.env for a box where something else already holds it.
+#
+# --- tailscale whois as a non-root, non-operator user: what must be true --------------------
+# app.py's auth middleware (§8.3) runs `tailscale whois` as cdl-dash, an unprivileged system
+# account with no interactive login. tailscaled's LocalAPI socket
+# (/run/tailscale/tailscaled.sock) is root-only by default; a non-root caller gets it only
+# once a human runs `sudo tailscale set --operator=cdl-dash` on this box, which this module
+# does NOT do for you, on purpose: Tailscale allows exactly one operator system-wide
+# (tailscale/tailscale#17817), so setting it here would silently take that grant away from
+# a human who set `tailscale set --operator=<their own login>` for their own convenience.
+# That is a worse failure than the one it would fix.
+#
+# Until that `set --operator` command has been run: every whois call fails, so every
+# non-loopback request is refused (fail closed -- a safe default, just not a working
+# dashboard). app.py's real_tailscale_whois() now runs the CLI as its own account (never
+# root, never given operator here) and logs the process's stderr verbatim on failure --
+# "cdl-dash whois failed for <ip>: <stderr>" -- so this exact permission gap names itself in
+# `journalctl -u cdl-dashboard` on the real machine instead of presenting as a mute 403.
 
 set -uo pipefail
 # shellcheck source-path=SCRIPTDIR source=../lib.sh
@@ -64,15 +81,29 @@ done
 chmod 0755 "$APP_DIR/app.py" "$APP_DIR/gpu-telemetry.sh" "$APP_DIR/resolve-bind.sh"
 chmod 0644 "$APP_DIR/requirements.txt"
 
-# --- /etc/cdl/dashboard.env: the one thing an operator might reasonably want to change ------
-cdl_write_if_changed "$CDL_ETC/dashboard.env" <<CONF
+# --- /etc/cdl/dashboard.env: seeded once, then left alone --------------------------------
+# dashboard.env.default is fully managed (rewritten every run, like everything else this
+# module owns) and carries only the shipped defaults. dashboard.env is what the unit
+# actually reads, and it is copied from the default ONLY if it does not already exist: an
+# operator who has changed CDL_DASH_PORT by hand must not have that reverted on the next
+# `./install.sh`, which cdl_write_if_changed would otherwise do to this file every run.
+DEFAULT_ENV="$CDL_ETC/dashboard.env.default"
+ENV_FILE="$CDL_ETC/dashboard.env"
+
+cdl_write_if_changed "$DEFAULT_ENV" <<CONF
 $CDL_MANAGED
-# Read by cdl-dashboard.service via EnvironmentFile. CDL_DASH_PORT is the only value meant
-# to be edited by hand; BIND_HOST and CDL_DASH_TAILNET are written at every service start by
-# install/dashboard/resolve-bind.sh and live in the unit's own RuntimeDirectory, not here.
+# The shipped defaults for cdl-dashboard.service. Rewritten every run -- do not edit this
+# file. It is copied to $ENV_FILE once, the first time this module runs on a machine; that
+# copy is never touched again, so edit $ENV_FILE by hand instead.
 CDL_DASH_PORT=$DASH_PORT_DEFAULT
 CONF
-chmod 0644 "$CDL_ETC/dashboard.env"
+chmod 0644 "$DEFAULT_ENV"
+
+if [ ! -f "$ENV_FILE" ]; then
+    cp "$DEFAULT_ENV" "$ENV_FILE"
+    dim "    seeded $ENV_FILE from $DEFAULT_ENV; edit it by hand from here on"
+fi
+chmod 0644 "$ENV_FILE"
 
 # --- venv: created once, packages pinned and verified rather than "latest" ------------------
 if [ ! -x "$VENV_DIR/bin/python" ]; then

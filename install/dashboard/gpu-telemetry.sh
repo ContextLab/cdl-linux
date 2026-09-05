@@ -28,6 +28,20 @@ write_atomic() {
     mv -f "$tmp" "$dest"
 }
 
+# nvidia-smi prints the literal string "[N/A]" for a field it cannot read -- common for
+# power.draw and utilization on some mobile GPUs, and for every field during driver init.
+# Emitting that unquoted would make invalid JSON, which is worse than a missing reading: it
+# would make _read_json_file() in app.py fail closed and report "no GPU" instead of "GPU
+# present, one field unknown". Anything that is not a plain number becomes JSON null.
+num_or_null() {
+    local v
+    v="$(echo "$1" | xargs)"
+    case "$v" in
+        ''|*[!0-9.+-]*) printf 'null' ;;
+        *) printf '%s' "$v" ;;
+    esac
+}
+
 # --- GPU ---------------------------------------------------------------------------------
 if command -v nvidia-smi >/dev/null 2>&1; then
     csv="$(nvidia-smi \
@@ -37,9 +51,12 @@ if command -v nvidia-smi >/dev/null 2>&1; then
         gpus="["
         first=1
         while IFS=',' read -r idx util mem_used mem_total temp power; do
-            idx="$(echo "$idx" | xargs)"; util="$(echo "$util" | xargs)"
-            mem_used="$(echo "$mem_used" | xargs)"; mem_total="$(echo "$mem_total" | xargs)"
-            temp="$(echo "$temp" | xargs)"; power="$(echo "$power" | xargs)"
+            idx="$(num_or_null "$idx")"
+            util="$(num_or_null "$util")"
+            mem_used="$(num_or_null "$mem_used")"
+            mem_total="$(num_or_null "$mem_total")"
+            temp="$(num_or_null "$temp")"
+            power="$(num_or_null "$power")"
             [ "$first" -eq 1 ] || gpus+=","
             first=0
             gpus+=$(printf '{"index":%s,"utilization_pct":%s,"memory_used_mib":%s,"memory_total_mib":%s,"temperature_c":%s,"power_draw_w":%s}' \

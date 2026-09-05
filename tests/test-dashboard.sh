@@ -53,6 +53,43 @@ fi
 if bash -n "$MODULE"; then ok "bash -n: 55-dashboard.sh"; else bad "bash -n: 55-dashboard.sh"; fi
 
 # ---------------------------------------------------------------------------------------
+echo "== gpu-telemetry.sh: nvidia-smi's [N/A] must become JSON null, not invalid JSON =="
+# ---------------------------------------------------------------------------------------
+# nvidia-smi prints the literal "[N/A]" for a field it cannot read (common for power.draw
+# and utilization on some mobile GPUs, and for every field during driver init). A fixture
+# nvidia-smi on PATH stands in for the real one so this is real bash + real python3 json
+# parsing, not a description of what the code is supposed to do.
+NA_BIN="$tmp/na-bin"
+mkdir -p "$NA_BIN"
+cat > "$NA_BIN/nvidia-smi" <<'EOF'
+#!/usr/bin/env bash
+echo "0, [N/A], 1024, 24576, 45, [N/A]"
+EOF
+chmod +x "$NA_BIN/nvidia-smi"
+
+NA_RUN="$tmp/na-run"
+if PATH="$NA_BIN:$PATH" CDL_RUN_DIR="$NA_RUN" bash "$DASH_SRC/gpu-telemetry.sh"; then
+    ok "gpu-telemetry.sh ran against a fixture nvidia-smi returning [N/A] fields"
+else
+    bad "gpu-telemetry.sh exited nonzero against a fixture [N/A] nvidia-smi"
+fi
+
+if python3 -c "
+import json
+d = json.load(open('$NA_RUN/gpu.json'))
+assert isinstance(d, list) and len(d) == 1, d
+g = d[0]
+assert g['utilization_pct'] is None, g
+assert g['power_draw_w'] is None, g
+assert g['temperature_c'] == 45, g
+assert g['memory_used_mib'] == 1024, g
+"; then
+    ok "/run/cdl/gpu.json is valid JSON with null for every [N/A] field"
+else
+    bad "gpu.json was not valid JSON, or [N/A] did not become null: $(cat "$NA_RUN/gpu.json" 2>/dev/null)"
+fi
+
+# ---------------------------------------------------------------------------------------
 echo "== venv + real pinned fastapi/uvicorn =="
 # ---------------------------------------------------------------------------------------
 VENV="$tmp/venv"
@@ -91,6 +128,29 @@ cat > "$FIXTURE_DIR/backup-runs.jsonl" <<'JSON'
 {"started":"2026-09-01T02:30:00Z","result":"ok","detail":"snapshot abc123","seconds":42}
 JSON
 
+# Machine panel (sec 8.1) fixtures: a fake /proc/meminfo, a fake sysfs thermal zone, and a
+# fake intel_pstate max_perf_pct -- this Mac has none of these in the real Linux shape.
+MEMINFO="$tmp/meminfo"
+cat > "$MEMINFO" <<'EOF'
+MemTotal:       16384000 kB
+MemFree:         2048000 kB
+MemAvailable:    9000000 kB
+EOF
+
+THERMAL_ROOT="$tmp/thermal"
+mkdir -p "$THERMAL_ROOT/thermal_zone0"
+echo "x86_pkg_temp" > "$THERMAL_ROOT/thermal_zone0/type"
+echo "52300" > "$THERMAL_ROOT/thermal_zone0/temp"
+
+MAX_PERF_PCT="$tmp/max_perf_pct"
+echo "83" > "$MAX_PERF_PCT"
+
+# Largest-models fixture: two "models" of different sizes under a fake ollama store.
+MODELS_DIR="$tmp/models/ollama"
+mkdir -p "$MODELS_DIR"
+head -c 2048 /dev/zero > "$MODELS_DIR/small.bin"
+head -c 8192 /dev/zero > "$MODELS_DIR/big.bin"
+
 # A free port: ask the OS for one, then release it immediately. A fixed port would collide
 # with a leftover process from a previous failed run.
 PORT="$(python3 -c 'import socket; s=socket.socket(); s.bind(("0.0.0.0",0)); print(s.getsockname()[1]); s.close()')"
@@ -100,6 +160,11 @@ PORT="$(python3 -c 'import socket; s=socket.socket(); s.bind(("0.0.0.0",0)); pri
 # request comes from, not on what the server bound to, so one instance covers both the
 # "loopback is always allowed" and "a real non-loopback caller is refused" cases below.
 CDL_DASH_FIXTURE_DIR="$FIXTURE_DIR" \
+CDL_PROC_MEMINFO="$MEMINFO" \
+CDL_SYS_THERMAL_ROOT="$THERMAL_ROOT" \
+CDL_SYS_MAX_PERF_PCT="$MAX_PERF_PCT" \
+CDL_MODELS_OLLAMA_DIR="$MODELS_DIR" \
+CDL_MODELS_GGUF_DIR="$tmp/no-such-gguf-dir" \
 BIND_HOST=0.0.0.0 \
 CDL_DASH_PORT="$PORT" \
 CDL_ZELLIJ_SOCKET_DIR="$tmp/no-such-zellij-dir" \
@@ -142,7 +207,7 @@ fi
 if python3 -c "
 import json, sys
 d = json.load(open('$status_json'))
-want = {'generated_at','gpu','smart','ollama','llama_swap','sessions','storage','backup','tailscale'}
+want = {'generated_at','gpu','smart','ollama','llama_swap','sessions','storage','machine','backup','tailscale'}
 missing = want - d.keys()
 assert not missing, f'missing keys: {missing}'
 assert d['gpu'][0]['temperature_c'] == 45, d['gpu']
@@ -153,6 +218,32 @@ assert isinstance(d['storage']['root'], dict), d['storage']
     ok "/api/status has the expected keys and reflects fixture data"
 else
     bad "/api/status JSON shape or fixture values wrong"
+fi
+
+if python3 -c "
+import json
+d = json.load(open('$status_json'))
+m = d['machine']
+assert m['cpu_temperature_c']['value'] == 52.3, m
+assert m['cpu_temperature_c']['reason'] is None, m
+assert m['max_perf_pct']['value'] == 83, m
+assert m['load'] is not None and 'load1' in m['load'], m
+assert m['memory']['total_kib'] == 16384000, m
+assert m['memory']['available_kib'] == 9000000, m
+assert m['memory']['used_kib'] == 16384000 - 9000000, m
+lm = d['storage']['largest_models']
+names = [x['path'].split('/')[-1] for x in lm['models']]
+assert names[0] == 'big.bin', lm
+assert names[1] == 'small.bin', lm
+assert lm['models'][0]['size_bytes'] == 8192, lm
+assert d['ollama']['requests_served']['value'] is None, d['ollama']
+assert d['ollama']['requests_served']['reason'], d['ollama']
+assert d['llama_swap']['requests_served']['value'] is None, d['llama_swap']
+"; then
+    ok "machine panel (CPU temp, max_perf_pct, load, memory) and largest_models reflect fixtures"
+    ok "requests_served is null-with-reason for ollama and llama-swap (genuinely unavailable)"
+else
+    bad "machine panel / largest_models / requests_served shape or values wrong"
 fi
 
 code="$(curl -s -o /dev/null -w '%{http_code}' "$base/palette.css")"
