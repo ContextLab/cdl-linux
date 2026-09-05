@@ -250,14 +250,14 @@ sha256 matched a fresh download of its asset.
 |-|-|-|
 | B1 | `35-gpu-lock`: `ExecStopPost` runs under `User=$SUDO_USER`, so restore cannot `systemctl start` for any non-root caller; §6.1's SIGKILL guarantee void | with the models builder, who holds the VM; the VM independently showed 17/60 verifier failures of this class |
 | B2 | `15-btrfs` exit 1 stopped modules 20–60 on any ext4 machine — i.e. portable mode's only prerequisite | **fixed 5259e83** (skip) |
-| B3 | GPU detection via `lspci`, which nothing installs → silent CPU path on the Tensorbook | **fixed 5259e83** (sysfs vendor 0x10de); `cdl-ml-check` copy with the nvidia builder |
-| 4 | `gpu-telemetry.sh` emits `[N/A]` unquoted → invalid JSON → panel silently empty | dashboard builder |
-| 5 | `backup.conf` and `dashboard.env` told the operator to edit them, then got rewritten each run | backup half **fixed 5259e83** (seed once); dashboard half with its builder |
+| B3 | GPU detection via `lspci`, which nothing installs → silent CPU path on the Tensorbook | **fixed** 5259e83 (lib.sh), 7f44113 (`cdl-ml-check`, guard proven live against a reverted copy) |
+| 4 | `gpu-telemetry.sh` emits `[N/A]` unquoted → invalid JSON → panel silently empty | **fixed 9b74f23** |
+| 5 | `backup.conf` and `dashboard.env` told the operator to edit them, then got rewritten each run | **fixed** 5259e83 (backup), 9b74f23 (dashboard) |
 | 6 | 11434 fence is a separate nft table; `nftables.service`'s `flush ruleset` would drop it while ollama serves 0.0.0.0 | models builder |
-| 7 | §8.1 Machine panel, requests served, largest models absent from the dashboard | dashboard builder |
-| 8 | `tailscale whois` as `cdl-dash` — LocalAPI permission unverified | dashboard builder (document + name the failure) |
-| 9 | sshd guard checks group but not that the user has an `authorized_keys` → password-only boxes lock out | remote builder |
-| 10 | `nvidia.txt` records the loaded driver version, which differs across the reboot → spurious "reboot required" on idle runs | nvidia builder |
+| 7 | §8.1 Machine panel, requests served, largest models absent from the dashboard | **fixed 9b74f23**; requests-served is null with the reason (no API counter) |
+| 8 | `tailscale whois` as `cdl-dash` — LocalAPI permission unverified | **documented 9b74f23**: needs a one-time `tailscale set --operator=cdl-dash` by a human; failures now log their cause. Real-tailnet test is H1's |
+| 9 | sshd guard checks group but not that the user has an `authorized_keys` → password-only boxes lock out | **fixed dcd5fb4** |
+| 10 | `nvidia.txt` records the loaded driver version, which differs across the reboot → spurious "reboot required" on idle runs | **fixed 7f44113** |
 
 **Wave 2 (me):** integrate, `run-all.sh`, full `run-vm.sh` on the clean VM, fix, iterate;
 then a cold `code-reviewer` over `install/`; then commit per module.
